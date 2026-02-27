@@ -1,0 +1,12 @@
+{
+  "completed": true,
+  "startedAt": "2026-02-27T14:08:25.243Z",
+  "updatedAt": "2026-02-27T14:08:25.243Z",
+  "answers": {
+    "projectName": "sentinel",
+    "productIdea": "watch things for safe computing.",
+    "additionalContext": "Existing project with established codebase.\n- Git history: 2 commits since 2026-02-27, 1 contributor(s)\n- Recent work: \"Translate README to English + add social preview image\", \"Initial release v0.1.0 — AI Session Guardian for macOS\"",
+    "coreFeatures": "Existing project features",
+    "techStack": ""
+  }
+}

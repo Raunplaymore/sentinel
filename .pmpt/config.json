@@ -1,0 +1,14 @@
+{
+  "projectPath": "/Users/hwangjunguk/Desktop/dir_UK/sentinel",
+  "docsPath": ".pmpt/docs",
+  "ignorePatterns": [
+    "node_modules/**",
+    ".pmpt/.history/**",
+    "dist/**"
+  ],
+  "createdAt": "2026-02-27T14:07:20.834Z",
+  "repo": "https://github.com/Raunplaymore/sentinel",
+  "trackGit": true,
+  "origin": "new",
+  "gitCommitsAtInit": 2
+}
