@@ -50,6 +50,10 @@ class SystemMetrics:
     # Network
     net_sent_mb: float = 0.0
     net_recv_mb: float = 0.0
+    # Security posture
+    firewall_enabled: Optional[bool] = None
+    gatekeeper_enabled: Optional[bool] = None
+    filevault_enabled: Optional[bool] = None
     # AI Processes
     ai_processes: list = field(default_factory=list)
     ai_cpu_total: float = 0.0
@@ -130,6 +134,48 @@ def resolve_data_dir() -> Path:
     return data_dir
 
 
+def _validate_config(config: dict) -> dict:
+    """Validate and clamp config values to safe ranges."""
+    # Top-level numeric fields: (key, min, max, type)
+    numeric_fields = [
+        ("check_interval_seconds", 5, 3600),
+        ("status_interval_minutes", 1, 1440),
+        ("cooldown_minutes", 1, 1440),
+    ]
+    for key, lo, hi in numeric_fields:
+        val = config.get(key)
+        if not isinstance(val, (int, float)) or val < lo:
+            config[key] = DEFAULT_CONFIG[key]
+        elif val > hi:
+            config[key] = hi
+
+    # Threshold fields: (key, min, max)
+    threshold_ranges = {
+        "battery_warning": (5, 50),
+        "battery_critical": (1, 30),
+        "battery_drain_rate": (1, 100),
+        "temp_warning": (50, 110),
+        "temp_critical": (60, 120),
+        "memory_critical": (50, 99),
+        "disk_critical": (50, 99),
+        "network_spike_mb": (1, 10000),
+        "session_hours_warning": (1, 72),
+    }
+    thresholds = config.get("thresholds", {})
+    if not isinstance(thresholds, dict):
+        config["thresholds"] = DEFAULT_CONFIG["thresholds"].copy()
+        return config
+
+    for key, (lo, hi) in threshold_ranges.items():
+        val = thresholds.get(key)
+        if not isinstance(val, (int, float)) or val < lo:
+            thresholds[key] = DEFAULT_CONFIG["thresholds"][key]
+        elif val > hi:
+            thresholds[key] = hi
+    config["thresholds"] = thresholds
+    return config
+
+
 def load_config(config_path: Path = None) -> dict:
     """Load config with error handling and default fallback."""
     defaults = DEFAULT_CONFIG.copy()
@@ -141,9 +187,12 @@ def load_config(config_path: Path = None) -> dict:
     try:
         with open(config_path) as f:
             user_config = yaml.safe_load(f) or {}
+        if not isinstance(user_config, dict):
+            logging.error("Config format error: top-level YAML must be a mapping — using defaults")
+            return defaults
         merged = {**defaults, **user_config}
         merged["thresholds"] = {**defaults["thresholds"], **user_config.get("thresholds", {})}
-        return merged
+        return _validate_config(merged)
     except FileNotFoundError:
         logging.warning(f"Config not found: {config_path} — using defaults")
         return defaults
@@ -210,6 +259,11 @@ class MacOSCollector:
 
         # Fan
         m.fan_speed_rpm = self._get_fan_speed()
+
+        # Security posture
+        m.firewall_enabled = self._get_firewall_enabled()
+        m.gatekeeper_enabled = self._get_gatekeeper_enabled()
+        m.filevault_enabled = self._get_filevault_enabled()
 
         # Network delta
         net_now = psutil.net_io_counters()
@@ -294,6 +348,54 @@ class MacOSCollector:
             pass
         return None
 
+    def _get_firewall_enabled(self) -> Optional[bool]:
+        """Get macOS application firewall state."""
+        try:
+            out = subprocess.run(
+                ["/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate"],
+                capture_output=True, text=True, timeout=3
+            )
+            text = f"{out.stdout}\n{out.stderr}".lower()
+            if "disabled" in text:
+                return False
+            if "enabled" in text:
+                return True
+        except Exception:
+            pass
+        return None
+
+    def _get_gatekeeper_enabled(self) -> Optional[bool]:
+        """Get Gatekeeper state from spctl."""
+        try:
+            out = subprocess.run(
+                ["spctl", "--status"],
+                capture_output=True, text=True, timeout=3
+            )
+            text = f"{out.stdout}\n{out.stderr}".lower()
+            if "assessments disabled" in text:
+                return False
+            if "assessments enabled" in text:
+                return True
+        except Exception:
+            pass
+        return None
+
+    def _get_filevault_enabled(self) -> Optional[bool]:
+        """Get FileVault disk encryption state."""
+        try:
+            out = subprocess.run(
+                ["fdesetup", "status"],
+                capture_output=True, text=True, timeout=3
+            )
+            text = f"{out.stdout}\n{out.stderr}".lower()
+            if "filevault is off" in text:
+                return False
+            if "filevault is on" in text:
+                return True
+        except Exception:
+            pass
+        return None
+
     def _get_ai_processes(self) -> list:
         """Identify AI-related processes and their resource usage.
 
@@ -358,18 +460,18 @@ class AlertEngine:
                 if m.battery_percent <= self.thresholds.get("battery_critical", 10):
                     alerts.append(Alert(
                         level="critical", category="battery_critical",
-                        title="🪫 배터리 위험",
-                        message=f"배터리 {m.battery_percent}% — 충전기 연결 필요!\n"
-                               f"{'예상 ' + str(m.battery_minutes_left) + '분 남음' if m.battery_minutes_left else ''}",
+                        title="🪫 Battery Critical",
+                        message=f"Battery at {m.battery_percent}% — plug in now!\n"
+                               f"{'~' + str(m.battery_minutes_left) + ' min remaining' if m.battery_minutes_left else ''}",
                         emoji="🔴", priority=5
                     ))
                 elif m.battery_percent <= self.thresholds.get("battery_warning", 20):
-                    time_msg = f"\n예상 {m.battery_minutes_left}분 남음" if m.battery_minutes_left else ""
-                    ai_msg = f"\nAI 프로세스 {len(m.ai_processes)}개 실행 중" if m.ai_processes else ""
+                    time_msg = f"\n~{m.battery_minutes_left} min remaining" if m.battery_minutes_left else ""
+                    ai_msg = f"\n{len(m.ai_processes)} AI process(es) running" if m.ai_processes else ""
                     alerts.append(Alert(
                         level="warning", category="battery_warning",
-                        title="🔋 배터리 부족",
-                        message=f"배터리 {m.battery_percent}%, 충전기 미연결{time_msg}{ai_msg}",
+                        title="🔋 Battery Low",
+                        message=f"Battery {m.battery_percent}%, not charging{time_msg}{ai_msg}",
                         emoji="🟠", priority=4
                     ))
 
@@ -377,17 +479,19 @@ class AlertEngine:
                 if len(self._history) >= 3:
                     oldest = self._history[0]
                     elapsed_hours = (m.timestamp - oldest.timestamp).total_seconds() / 3600
-                    if elapsed_hours > 0.01:
-                        drain_total = (oldest.battery_percent or 0) - (m.battery_percent or 0)
+                    if (elapsed_hours > 0.01
+                            and oldest.battery_percent is not None
+                            and m.battery_percent is not None):
+                        drain_total = oldest.battery_percent - m.battery_percent
                         drain_per_hour = drain_total / elapsed_hours
                         threshold = self.thresholds.get("battery_drain_rate", 10)
                         if drain_per_hour > threshold:
                             alerts.append(Alert(
                                 level="warning", category="battery_drain",
-                                title="⚡ 배터리 급속 소모",
-                                message=f"소모 속도: {drain_per_hour:.1f}%/시간\n"
-                                       f"({elapsed_hours * 60:.0f}분간 {drain_total:.1f}% 감소)\n"
-                                       f"AI CPU 사용: {m.ai_cpu_total:.0f}%",
+                                title="⚡ Rapid Battery Drain",
+                                message=f"Drain rate: {drain_per_hour:.1f}%/hr\n"
+                                       f"({drain_total:.1f}% lost in {elapsed_hours * 60:.0f} min)\n"
+                                       f"AI CPU usage: {m.ai_cpu_total:.0f}%",
                                 emoji="🟠", priority=4
                             ))
 
@@ -396,27 +500,27 @@ class AlertEngine:
             if m.cpu_temp >= self.thresholds.get("temp_critical", 95):
                 alerts.append(Alert(
                     level="critical", category="temp_critical",
-                    title="🌡️ CPU 과열 위험!",
-                    message=f"CPU 온도 {m.cpu_temp}°C — 쓰로틀링 발생 중\n"
+                    title="🌡️ CPU Overheating!",
+                    message=f"CPU temp {m.cpu_temp}°C — throttling active\n"
                            f"Thermal: {m.thermal_pressure}\n"
-                           f"{'팬 ' + str(m.fan_speed_rpm) + ' RPM' if m.fan_speed_rpm else ''}",
+                           f"{'Fan ' + str(m.fan_speed_rpm) + ' RPM' if m.fan_speed_rpm else ''}",
                     emoji="🔴", priority=5
                 ))
             elif m.cpu_temp >= self.thresholds.get("temp_warning", 85):
                 alerts.append(Alert(
                     level="warning", category="temp_warning",
-                    title="🌡️ CPU 온도 높음",
-                    message=f"CPU {m.cpu_temp}°C | 팬 {m.fan_speed_rpm or '?'} RPM\n"
-                           f"CPU 사용률 {m.cpu_percent}%",
+                    title="🌡️ CPU Temperature High",
+                    message=f"CPU {m.cpu_temp}°C | Fan {m.fan_speed_rpm or '?'} RPM\n"
+                           f"CPU usage {m.cpu_percent}%",
                     emoji="🟠", priority=3
                 ))
 
         elif m.thermal_pressure in ("critical", "serious"):
             alerts.append(Alert(
                 level="warning", category="thermal_pressure",
-                title="🌡️ 시스템 쓰로틀링 감지",
+                title="🌡️ System Throttling Detected",
                 message=f"Thermal pressure: {m.thermal_pressure}\n"
-                       f"CPU {m.cpu_percent}% | 메모리 {m.memory_percent}%",
+                       f"CPU {m.cpu_percent}% | Memory {m.memory_percent}%",
                 emoji="🟠", priority=4
             ))
 
@@ -424,9 +528,27 @@ class AlertEngine:
         if m.memory_percent >= self.thresholds.get("memory_critical", 90):
             alerts.append(Alert(
                 level="warning", category="memory_high",
-                title="💾 메모리 부족",
-                message=f"메모리 {m.memory_percent}% 사용 ({m.memory_used_gb}GB)\n"
-                       f"AI 프로세스: {m.ai_memory_total_mb:.0f}MB 점유",
+                title="💾 Memory Critical",
+                message=f"Memory at {m.memory_percent}% ({m.memory_used_gb}GB)\n"
+                       f"AI processes using {m.ai_memory_total_mb:.0f}MB",
+                emoji="🟠", priority=4
+            ))
+
+        # ── Security Posture ──
+        disabled_controls = []
+        if m.firewall_enabled is False:
+            disabled_controls.append("Firewall")
+        if m.gatekeeper_enabled is False:
+            disabled_controls.append("Gatekeeper")
+        if m.filevault_enabled is False:
+            disabled_controls.append("FileVault")
+
+        if disabled_controls:
+            alerts.append(Alert(
+                level="warning", category="security_posture",
+                title="🛡️ Security Posture Risk",
+                message=f"Disabled protections: {', '.join(disabled_controls)}\n"
+                       f"Re-enable them to reduce security exposure.",
                 emoji="🟠", priority=4
             ))
 
@@ -443,8 +565,8 @@ class AlertEngine:
                     top = m.ai_processes[0]
                     alerts.append(Alert(
                         level="info", category="long_session",
-                        title="⏰ 장시간 AI 세션",
-                        message=f"AI 세션 {duration:.1f}시간 경과\n"
+                        title="⏰ Long AI Session",
+                        message=f"AI session running for {duration:.1f}h\n"
                                f"Top: {top['name']} (CPU {top['cpu']}%, MEM {top['mem_mb']}MB)",
                         emoji="🟡", priority=3
                     ))
@@ -456,9 +578,9 @@ class AlertEngine:
                 if avg_cpu > 50 and avg_net < 0.1:
                     alerts.append(Alert(
                         level="warning", category="stuck_process",
-                        title="🔄 프로세스 멈춤 의심",
-                        message=f"AI 프로세스 CPU {avg_cpu:.0f}% 사용 중이나\n"
-                               f"네트워크 I/O 거의 없음 — 무한루프 가능성",
+                        title="🔄 Suspected Stuck Process",
+                        message=f"AI process using {avg_cpu:.0f}% CPU\n"
+                               f"but near-zero network I/O — possible infinite loop",
                         emoji="🟠", priority=4
                     ))
 
@@ -468,8 +590,8 @@ class AlertEngine:
                 if duration > 5:
                     alerts.append(Alert(
                         level="info", category="session_end",
-                        title="✅ AI 세션 종료",
-                        message=f"세션 시간: {duration:.0f}분",
+                        title="✅ AI Session Ended",
+                        message=f"Session duration: {duration:.0f} min",
                         emoji="✅", priority=2
                     ))
                 self._session_start = None
@@ -481,9 +603,9 @@ class AlertEngine:
         if (0 <= hour <= 6) and m.ai_processes and not m.battery_plugged:
             alerts.append(Alert(
                 level="warning", category="night_watch",
-                title="🌙 야간 방치 감지",
-                message=f"새벽 {hour}시 — AI 세션 활성 + 배터리 {m.battery_percent}%\n"
-                       f"충전기 미연결 상태",
+                title="🌙 Unattended Night Session",
+                message=f"{hour}:00 AM — AI session active + battery {m.battery_percent}%\n"
+                       f"Charger not connected",
                 emoji="🟡", priority=4
             ))
 
@@ -492,9 +614,9 @@ class AlertEngine:
         if m.disk_percent >= disk_threshold:
             alerts.append(Alert(
                 level="warning", category="disk_high",
-                title="💿 디스크 공간 부족",
-                message=f"디스크 사용률 {m.disk_percent}%\n"
-                       f"남은 공간: {m.disk_free_gb}GB",
+                title="💿 Disk Space Low",
+                message=f"Disk usage at {m.disk_percent}%\n"
+                       f"Remaining: {m.disk_free_gb}GB",
                 emoji="🟠", priority=4
             ))
 
@@ -504,17 +626,17 @@ class AlertEngine:
         if total_mb > net_threshold:
             alerts.append(Alert(
                 level="info", category="network_spike",
-                title="📡 네트워크 트래픽 급증",
-                message=f"이번 간격: ↑{m.net_sent_mb:.1f}MB ↓{m.net_recv_mb:.1f}MB\n"
-                       f"총 {total_mb:.1f}MB",
+                title="📡 Network Traffic Spike",
+                message=f"This interval: ↑{m.net_sent_mb:.1f}MB ↓{m.net_recv_mb:.1f}MB\n"
+                       f"Total {total_mb:.1f}MB",
                 emoji="🟡", priority=3
             ))
 
-        return self._apply_cooldowns(alerts)
+        return self._apply_cooldowns(alerts, now=m.timestamp)
 
-    def _apply_cooldowns(self, alerts: list[Alert]) -> list[Alert]:
+    def _apply_cooldowns(self, alerts: list[Alert], now: Optional[datetime] = None) -> list[Alert]:
         """Prevent alert spam by enforcing cooldown per category."""
-        now = datetime.now()
+        now = now or datetime.now()
         filtered = []
         for alert in alerts:
             last = self._cooldowns.get(alert.category)
@@ -596,23 +718,32 @@ class NtfyNotifier:
         lines = [
             f"CPU: {m.cpu_percent}%{f' | {m.cpu_temp}°C' if m.cpu_temp else ''}",
             f"MEM: {m.memory_percent}% ({m.memory_used_gb}GB)",
-            f"DISK: {m.disk_percent}% (잔여 {m.disk_free_gb}GB)",
+            f"DISK: {m.disk_percent}% ({m.disk_free_gb}GB free)",
         ]
         if m.battery_percent is not None:
             plug = "🔌" if m.battery_plugged else "🔋"
             lines.append(f"BAT: {plug} {m.battery_percent}%"
-                        f"{f' ({m.battery_minutes_left}분)' if m.battery_minutes_left else ''}")
+                        f"{f' ({m.battery_minutes_left} min)' if m.battery_minutes_left else ''}")
         if m.fan_speed_rpm:
             lines.append(f"FAN: {m.fan_speed_rpm} RPM")
+        security = []
+        if m.firewall_enabled is not None:
+            security.append(f"FW {'ON' if m.firewall_enabled else 'OFF'}")
+        if m.gatekeeper_enabled is not None:
+            security.append(f"GK {'ON' if m.gatekeeper_enabled else 'OFF'}")
+        if m.filevault_enabled is not None:
+            security.append(f"FV {'ON' if m.filevault_enabled else 'OFF'}")
+        if security:
+            lines.append(f"SEC: {' | '.join(security)}")
         if m.ai_processes:
-            lines.append(f"AI: {len(m.ai_processes)}개 프로세스, CPU {m.ai_cpu_total:.0f}%")
+            lines.append(f"AI: {len(m.ai_processes)} process(es), CPU {m.ai_cpu_total:.0f}%")
             top = m.ai_processes[0]
             lines.append(f"  Top: {top['name']} ({top['cpu']}%)")
 
         message = "\n".join(lines)
         alert = Alert(
             level="info", category="status",
-            title="📊 Sentinel 상태 보고",
+            title="📊 Sentinel Status Report",
             message=message,
             priority=1
         )
@@ -630,6 +761,7 @@ class Sentinel:
         # Prevent duplicate instances via PID file lock
         self._pid_file = None
         self._data_dir = resolve_data_dir()
+        self._data_dir.mkdir(parents=True, exist_ok=True)
         self._acquire_lock()
 
         resolved = resolve_config_path(config_path)
@@ -689,9 +821,9 @@ class Sentinel:
 
         self.notifier.send(Alert(
             level="info", category="startup",
-            title="🚀 Sentinel 시작됨",
-            message=f"모니터링 간격: {self.interval}초\n"
-                   f"상태 리포트: {self.status_interval}분마다",
+            title="🚀 Sentinel Started",
+            message=f"Check interval: {self.interval}s\n"
+                   f"Status report every {self.status_interval} min",
             priority=2
         ))
 
@@ -791,15 +923,24 @@ thresholds:
         print(f"  Thermal: {m.thermal_pressure}")
         print(f"  Memory:  {m.memory_percent}% ({m.memory_used_gb}GB)")
         if m.battery_percent is not None:
-            plug = "충전중 🔌" if m.battery_plugged else "배터리 🔋"
+            plug = "charging 🔌" if m.battery_plugged else "on battery 🔋"
             print(f"  Battery: {m.battery_percent}% ({plug})")
             if m.battery_minutes_left:
-                print(f"           예상 {m.battery_minutes_left}분 남음")
+                print(f"           ~{m.battery_minutes_left} min remaining")
             if m.battery_cycle_count:
-                print(f"           사이클: {m.battery_cycle_count}회")
-        print(f"  Disk:    {m.disk_percent}% (잔여 {m.disk_free_gb}GB)")
+                print(f"           Cycles: {m.battery_cycle_count}")
+        print(f"  Disk:    {m.disk_percent}% ({m.disk_free_gb}GB free)")
         if m.fan_speed_rpm:
             print(f"  Fan:     {m.fan_speed_rpm} RPM")
+        security = []
+        if m.firewall_enabled is not None:
+            security.append(f"Firewall {'ON' if m.firewall_enabled else 'OFF'}")
+        if m.gatekeeper_enabled is not None:
+            security.append(f"Gatekeeper {'ON' if m.gatekeeper_enabled else 'OFF'}")
+        if m.filevault_enabled is not None:
+            security.append(f"FileVault {'ON' if m.filevault_enabled else 'OFF'}")
+        if security:
+            print(f"  Security: {' | '.join(security)}")
         print(f"  Network: ↑{m.net_sent_mb}MB ↓{m.net_recv_mb}MB")
         if m.ai_processes:
             print(f"\n  AI Processes ({len(m.ai_processes)}):")
@@ -816,8 +957,8 @@ thresholds:
         notifier = NtfyNotifier(config)
         notifier.send(Alert(
             level="info", category="test",
-            title="🧪 Sentinel 테스트",
-            message="알림이 정상적으로 도착했습니다! ✅\n"
+            title="🧪 Sentinel Test",
+            message="Notification delivered successfully! ✅\n"
                    f"Topic: {config.get('ntfy_topic')}",
             priority=3
         ))

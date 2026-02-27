@@ -34,6 +34,9 @@ dependencies = [
     "requests>=2.28,<3",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
 [project.urls]
 Homepage = "https://github.com/raunplaymore/sentinel"
 Repository = "https://github.com/raunplaymore/sentinel"
@@ -45,3 +48,6 @@ sentinel = "sentinel_mac.core:main"
 
 [tool.setuptools.packages.find]
 include = ["sentinel_mac*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

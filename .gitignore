@@ -8,6 +8,13 @@ build/
 
 # Sentinel runtime
 logs/
+*.lock
+
+# Build tools
+generate_preview.py
+
+# Test cache
+.pytest_cache/
 
 # IDE
 .claude/
