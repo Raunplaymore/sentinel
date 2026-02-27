@@ -1,0 +1,40 @@
+# ───────────────────────────────────────
+# Sentinel — Configuration
+# ───────────────────────────────────────
+
+# ntfy.sh 설정 (install.sh에서 자동 생성됨)
+ntfy_topic: "sentinel-CHANGE-ME"
+ntfy_server: "https://ntfy.sh"
+notifications_enabled: true
+
+# 모니터링 간격 (초)
+check_interval_seconds: 30
+
+# 상태 리포트 간격 (분) — 0이면 비활성화
+status_interval_minutes: 60
+
+# 알림 쿨다운 (분) — 같은 카테고리 알림 반복 방지
+cooldown_minutes: 10
+
+# ── 임계값 ──
+thresholds:
+  # 배터리
+  battery_warning: 20          # % 이하일 때 경고
+  battery_critical: 10         # % 이하일 때 긴급
+  battery_drain_rate: 10       # 최근 5회 측정간 % 감소량
+
+  # 온도
+  temp_warning: 85             # °C
+  temp_critical: 95            # °C
+
+  # 메모리
+  memory_critical: 90          # % 사용률
+
+  # 디스크
+  disk_critical: 90            # % 사용률
+
+  # 네트워크
+  network_spike_mb: 100        # 측정 간격당 MB
+
+  # 세션
+  session_hours_warning: 3     # 시간 이상 연속 세션 시 알림
