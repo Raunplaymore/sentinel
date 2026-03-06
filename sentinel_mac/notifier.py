@@ -9,6 +9,7 @@ Design principles:
 """
 
 import logging
+import shutil
 import subprocess
 import requests
 from collections import deque
@@ -34,16 +35,40 @@ class NotificationChannel(Protocol):
 # ─── macOS Native Notifications ───
 
 class MacOSNotifier:
-    """macOS native notifications via osascript (no dependencies)."""
+    """macOS native notifications via terminal-notifier (preferred) or osascript (fallback)."""
+
+    def __init__(self):
+        self._use_terminal_notifier = shutil.which("terminal-notifier") is not None
 
     @property
     def name(self) -> str:
         return "macos"
 
     def send(self, alert: Alert) -> bool:
+        if self._use_terminal_notifier:
+            return self._send_terminal_notifier(alert)
+        return self._send_osascript(alert)
+
+    def _send_terminal_notifier(self, alert: Alert) -> bool:
+        cmd = [
+            "terminal-notifier",
+            "-title", alert.title,
+            "-subtitle", "Sentinel",
+            "-message", alert.message,
+        ]
+        if alert.level == "critical":
+            cmd.extend(["-sound", "Funk"])
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=5)
+            logging.info(f"[macos] Alert sent (terminal-notifier): {alert.title}")
+            return True
+        except Exception as e:
+            logging.error(f"[macos] terminal-notifier failed: {e}")
+            return False
+
+    def _send_osascript(self, alert: Alert) -> bool:
         title = alert.title.encode("utf-8", errors="replace").decode("utf-8")
         message = alert.message.encode("utf-8", errors="replace").decode("utf-8")
-        # Escape double quotes for AppleScript
         title = title.replace('"', '\\"')
         message = message.replace('"', '\\"')
 
@@ -60,10 +85,10 @@ class MacOSNotifier:
                 ["osascript", "-e", script],
                 capture_output=True, timeout=5,
             )
-            logging.info(f"[macos] Alert sent: {alert.title}")
+            logging.info(f"[macos] Alert sent (osascript): {alert.title}")
             return True
         except Exception as e:
-            logging.error(f"[macos] Send failed: {e}")
+            logging.error(f"[macos] osascript failed: {e}")
             return False
 
 

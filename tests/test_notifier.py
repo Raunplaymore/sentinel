@@ -71,8 +71,20 @@ class TestNtfyNotifier:
 
 class TestMacOSNotifier:
 
-    def test_send_calls_osascript(self):
-        notifier = MacOSNotifier()
+    def test_send_calls_terminal_notifier_when_available(self):
+        with patch("sentinel_mac.notifier.shutil.which", return_value="/usr/local/bin/terminal-notifier"):
+            notifier = MacOSNotifier()
+        alert = Alert(level="critical", category="test", title="Test", message="msg")
+        with patch("sentinel_mac.notifier.subprocess.run") as mock_run:
+            result = notifier.send(alert)
+            mock_run.assert_called_once()
+            args = mock_run.call_args[0][0]
+            assert args[0] == "terminal-notifier"
+            assert result is True
+
+    def test_send_falls_back_to_osascript(self):
+        with patch("sentinel_mac.notifier.shutil.which", return_value=None):
+            notifier = MacOSNotifier()
         alert = Alert(level="critical", category="test", title="Test", message="msg")
         with patch("sentinel_mac.notifier.subprocess.run") as mock_run:
             result = notifier.send(alert)
@@ -81,21 +93,33 @@ class TestMacOSNotifier:
             assert args[0] == "osascript"
             assert result is True
 
-    def test_critical_includes_sound(self):
-        notifier = MacOSNotifier()
+    def test_critical_includes_sound_terminal_notifier(self):
+        with patch("sentinel_mac.notifier.shutil.which", return_value="/usr/local/bin/terminal-notifier"):
+            notifier = MacOSNotifier()
         alert = Alert(level="critical", category="test", title="Test", message="msg")
         with patch("sentinel_mac.notifier.subprocess.run") as mock_run:
             notifier.send(alert)
-            script = mock_run.call_args[0][0][2]  # osascript -e <script>
-            assert 'sound name' in script
+            args = mock_run.call_args[0][0]
+            assert "-sound" in args
+            assert "Funk" in args
 
-    def test_warning_no_sound(self):
-        notifier = MacOSNotifier()
-        alert = Alert(level="warning", category="test", title="Test", message="msg")
+    def test_critical_includes_sound_osascript(self):
+        with patch("sentinel_mac.notifier.shutil.which", return_value=None):
+            notifier = MacOSNotifier()
+        alert = Alert(level="critical", category="test", title="Test", message="msg")
         with patch("sentinel_mac.notifier.subprocess.run") as mock_run:
             notifier.send(alert)
             script = mock_run.call_args[0][0][2]
-            assert 'sound name' not in script
+            assert 'sound name' in script
+
+    def test_warning_no_sound(self):
+        with patch("sentinel_mac.notifier.shutil.which", return_value="/usr/local/bin/terminal-notifier"):
+            notifier = MacOSNotifier()
+        alert = Alert(level="warning", category="test", title="Test", message="msg")
+        with patch("sentinel_mac.notifier.subprocess.run") as mock_run:
+            notifier.send(alert)
+            args = mock_run.call_args[0][0]
+            assert "-sound" not in args
 
     def test_name_property(self):
         assert MacOSNotifier().name == "macos"

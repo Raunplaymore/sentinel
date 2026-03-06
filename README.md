@@ -11,7 +11,7 @@
     <a href="https://pypi.org/project/sentinel-mac/"><img src="https://img.shields.io/pypi/v/sentinel-mac" alt="PyPI"></a>
     <img src="https://img.shields.io/badge/platform-macOS-blue" alt="macOS">
     <img src="https://img.shields.io/badge/python-3.8+-green" alt="Python 3.8+">
-    <img src="https://img.shields.io/badge/tests-188%20passed-brightgreen" alt="Tests">
+    <img src="https://img.shields.io/badge/tests-190%20passed-brightgreen" alt="Tests">
     <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT License">
     <br/>
     <a href="https://buymeacoffee.com/pmpt_cafe"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-orange?logo=buy-me-a-coffee&logoColor=white" alt="Buy Me a Coffee"></a>
@@ -465,10 +465,11 @@ Dependencies (installed automatically):
 ### Optional
 
 ```bash
-brew install osx-cpu-temp    # Exact CPU temperature readings
+brew install terminal-notifier   # Reliable macOS notifications (recommended for macOS 15+)
+brew install osx-cpu-temp        # Exact CPU temperature readings
 ```
 
-Sentinel auto-detects it once installed. Without it, thermal pressure status is used instead.
+Sentinel auto-detects both once installed. Without `terminal-notifier`, it falls back to `osascript` (which may not show notifications on macOS Sequoia). Without `osx-cpu-temp`, thermal pressure status is used instead.
 
 ## Uninstall
 
