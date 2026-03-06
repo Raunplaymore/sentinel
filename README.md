@@ -48,7 +48,14 @@ cd sentinel
 bash install.sh            # venv + deps + launchd (auto-starts on login)
 ```
 
-This creates an isolated venv at `~/.sentinel-venv`, installs all dependencies, and registers a launchd service that starts Sentinel automatically on login. The venv keeps your system Python clean — while Sentinel retains full access to system APIs (processes, network, file events).
+This creates an isolated venv, installs all dependencies, registers a launchd service (auto-start on login), and adds a `sentinel` alias to your shell. After restarting your terminal:
+
+```bash
+sentinel --once            # System snapshot
+sentinel --report          # Today's event summary
+sentinel --report 7        # Last 7 days
+sentinel --help            # All options
+```
 
 ### Alternative: pip install
 
