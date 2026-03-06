@@ -272,12 +272,15 @@ class Sentinel:
                 metrics = self.collector.collect()
 
                 logging.info(
-                    f"CPU:{metrics.cpu_percent}% "
-                    f"{'T:' + str(metrics.cpu_temp) + '\u00b0C ' if metrics.cpu_temp else ''}"
-                    f"MEM:{metrics.memory_percent}% "
-                    f"DISK:{metrics.disk_percent}% "
-                    f"BAT:{'\U0001f50c' if metrics.battery_plugged else '\U0001f50b'}{metrics.battery_percent}% "
-                    f"AI:{len(metrics.ai_processes)}procs"
+                    "CPU:{}% {}MEM:{}% DISK:{}% BAT:{}{}% AI:{}procs".format(
+                        metrics.cpu_percent,
+                        "T:{}°C ".format(metrics.cpu_temp) if metrics.cpu_temp else "",
+                        metrics.memory_percent,
+                        metrics.disk_percent,
+                        "\U0001f50c" if metrics.battery_plugged else "\U0001f50b",
+                        metrics.battery_percent,
+                        len(metrics.ai_processes),
+                    )
                 )
 
                 alerts = self.engine.evaluate(metrics)
@@ -382,7 +385,8 @@ thresholds:
         print(f"  Sentinel — System Snapshot")
         print(f"  {m.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*50}")
-        print(f"  CPU:     {m.cpu_percent}%{f'  |  {m.cpu_temp}\u00b0C' if m.cpu_temp else ''}")
+        cpu_temp = "  |  {}°C".format(m.cpu_temp) if m.cpu_temp else ""
+        print(f"  CPU:     {m.cpu_percent}%{cpu_temp}")
         print(f"  Thermal: {m.thermal_pressure}")
         print(f"  Memory:  {m.memory_percent}% ({m.memory_used_gb}GB)")
         if m.battery_percent is not None:
