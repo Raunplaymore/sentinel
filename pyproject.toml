@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sentinel-mac"
-version = "0.1.0"
-description = "AI Session Guardian for macOS — monitors battery, thermal, memory, disk, and AI processes with smart phone alerts"
+version = "0.3.0"
+description = "AI Agent Security Guardian for macOS — monitors system health and AI agent behavior (file access, network connections, risky commands) with smart alerts"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.8"
 authors = [
     { name = "raunplaymore" },
 ]
-keywords = ["macos", "monitoring", "ai", "battery", "thermal", "sentinel", "notification"]
+keywords = ["macos", "monitoring", "ai", "security", "sentinel", "ai-agent", "file-watcher", "notification"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: MacOS X",
@@ -26,12 +26,14 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: System :: Monitoring",
+    "Topic :: Security",
     "Topic :: Utilities",
 ]
 dependencies = [
     "psutil>=5.9,<7",
     "pyyaml>=6.0,<7",
     "requests>=2.28,<3",
+    "watchdog>=3.0,<5",
 ]
 
 [project.optional-dependencies]

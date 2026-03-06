@@ -10,5 +10,8 @@
   "repo": "https://github.com/Raunplaymore/sentinel",
   "trackGit": true,
   "origin": "new",
-  "gitCommitsAtInit": 2
+  "gitCommitsAtInit": 2,
+  "lastPublished": "2026-03-06T19:11:29.002Z",
+  "lastPublishedSlug": "sentinel",
+  "lastPublishedVersionCount": 8
 }

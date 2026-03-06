@@ -4,75 +4,32 @@ Sentinel — AI Session Guardian for macOS
 Monitors system resources and sends smart alerts via ntfy.sh
 """
 
-import psutil
-import subprocess
-import requests
-import yaml
-import time
-import json
 import logging
+import queue
 import signal
 import sys
 import os
-import re
 import fcntl
-from datetime import datetime, timedelta
+import time
+from datetime import datetime
 from pathlib import Path
-from collections import deque
-from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
-from typing import Optional
 
-# ─────────────────────────────────────────────
-# Data Models
-# ─────────────────────────────────────────────
-
-@dataclass
-class SystemMetrics:
-    timestamp: datetime
-    # CPU
-    cpu_percent: float = 0.0
-    cpu_temp: Optional[float] = None
-    thermal_pressure: str = "nominal"
-    # Memory
-    memory_percent: float = 0.0
-    memory_used_gb: float = 0.0
-    # Battery
-    battery_percent: Optional[float] = None
-    battery_plugged: bool = True
-    battery_minutes_left: Optional[int] = None
-    battery_cycle_count: Optional[int] = None
-    # Fan
-    fan_speed_rpm: Optional[int] = None
-    # Disk
-    disk_percent: float = 0.0
-    disk_free_gb: float = 0.0
-    # Network
-    net_sent_mb: float = 0.0
-    net_recv_mb: float = 0.0
-    # Security posture
-    firewall_enabled: Optional[bool] = None
-    gatekeeper_enabled: Optional[bool] = None
-    filevault_enabled: Optional[bool] = None
-    # AI Processes
-    ai_processes: list = field(default_factory=list)
-    ai_cpu_total: float = 0.0
-    ai_memory_total_mb: float = 0.0
-
-
-@dataclass
-class Alert:
-    level: str          # critical, warning, info
-    category: str       # battery, thermal, process, network, session
-    title: str
-    message: str
-    emoji: str = "⚠️"
-    priority: int = 3   # ntfy: 1=min, 3=default, 5=urgent
-
+# Re-export from new modules so existing imports (tests, sentinel.py) keep working
+from sentinel_mac.models import SystemMetrics, Alert, SecurityEvent  # noqa: F401
+from sentinel_mac.collectors.system import MacOSCollector  # noqa: F401
+from sentinel_mac.collectors.fs_watcher import FSWatcher  # noqa: F401
+from sentinel_mac.collectors.net_tracker import NetTracker  # noqa: F401
+from sentinel_mac.collectors.agent_log_parser import AgentLogParser  # noqa: F401
+from sentinel_mac.engine import AlertEngine  # noqa: F401
+from sentinel_mac.notifier import NtfyNotifier, NotificationManager, MacOSNotifier, SlackNotifier, TelegramNotifier  # noqa: F401
+from sentinel_mac.event_logger import EventLogger  # noqa: F401
 
 # ─────────────────────────────────────────────
 # Config Resolution
 # ─────────────────────────────────────────────
+
+import yaml
 
 DEFAULT_CONFIG = {
     "ntfy_topic": "sentinel-default",
@@ -202,555 +159,6 @@ def load_config(config_path: Path = None) -> dict:
 
 
 # ─────────────────────────────────────────────
-# Metric Collectors (macOS-specific)
-# ─────────────────────────────────────────────
-
-class MacOSCollector:
-    """Collects system metrics using macOS native tools + psutil."""
-
-    # Only match process names that are unambiguously AI-related
-    AI_PROCESS_NAMES = {
-        "ollama", "llamaserver", "mlx_lm",
-    }
-
-    # Match these keywords in the full command line (more precise)
-    AI_CMDLINE_KEYWORDS = [
-        "claude", "openai", "anthropic", "langchain",
-        "llama", "ollama", "transformers", "torch",
-        "jupyter", "notebook", "mlx_lm", "stable-diffusion",
-        "diffusers", "vllm", "text-generation",
-    ]
-
-    # Generic names that need cmdline keyword confirmation
-    GENERIC_PROCESS_NAMES = {
-        "node", "python", "python3", "code", "cursor", "docker",
-    }
-
-    def __init__(self):
-        self._prev_net = psutil.net_io_counters()
-        self._prev_net_time = time.time()
-
-    def collect(self) -> SystemMetrics:
-        m = SystemMetrics(timestamp=datetime.now())
-
-        # CPU
-        m.cpu_percent = psutil.cpu_percent(interval=1)
-        m.cpu_temp = self._get_cpu_temp()
-        m.thermal_pressure = self._get_thermal_pressure()
-
-        # Memory
-        mem = psutil.virtual_memory()
-        m.memory_percent = mem.percent
-        m.memory_used_gb = round(mem.used / (1024**3), 1)
-
-        # Disk (root volume)
-        disk = psutil.disk_usage("/")
-        m.disk_percent = disk.percent
-        m.disk_free_gb = round(disk.free / (1024**3), 1)
-
-        # Battery
-        bat = psutil.sensors_battery()
-        if bat:
-            m.battery_percent = round(bat.percent, 1)
-            m.battery_plugged = bat.power_plugged
-            if bat.secsleft > 0 and bat.secsleft != psutil.POWER_TIME_UNLIMITED:
-                m.battery_minutes_left = int(bat.secsleft / 60)
-        m.battery_cycle_count = self._get_battery_cycle_count()
-
-        # Fan
-        m.fan_speed_rpm = self._get_fan_speed()
-
-        # Security posture
-        m.firewall_enabled = self._get_firewall_enabled()
-        m.gatekeeper_enabled = self._get_gatekeeper_enabled()
-        m.filevault_enabled = self._get_filevault_enabled()
-
-        # Network delta
-        net_now = psutil.net_io_counters()
-        now = time.time()
-        dt = now - self._prev_net_time
-        if dt > 0:
-            m.net_sent_mb = round((net_now.bytes_sent - self._prev_net.bytes_sent) / (1024**2), 2)
-            m.net_recv_mb = round((net_now.bytes_recv - self._prev_net.bytes_recv) / (1024**2), 2)
-        self._prev_net = net_now
-        self._prev_net_time = now
-
-        # AI Processes
-        m.ai_processes = self._get_ai_processes()
-        m.ai_cpu_total = sum(p["cpu"] for p in m.ai_processes)
-        m.ai_memory_total_mb = sum(p["mem_mb"] for p in m.ai_processes)
-
-        return m
-
-    def _get_cpu_temp(self) -> Optional[float]:
-        """Get CPU temperature via osx-cpu-temp (brew install osx-cpu-temp)."""
-        try:
-            out = subprocess.run(
-                ["osx-cpu-temp"], capture_output=True, text=True, timeout=3
-            )
-            if out.returncode == 0:
-                match = re.search(r"([\d.]+)°C", out.stdout)
-                if match:
-                    return float(match.group(1))
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-        return None
-
-    def _get_thermal_pressure(self) -> str:
-        """Get macOS thermal pressure level."""
-        try:
-            out = subprocess.run(
-                ["pmset", "-g", "therm"], capture_output=True, text=True, timeout=3
-            )
-            if "sleeping" in out.stdout.lower():
-                return "critical"
-            for line in out.stdout.splitlines():
-                if "CPU_Speed_Limit" in line:
-                    match = re.search(r"(\d+)", line)
-                    if match:
-                        limit = int(match.group(1))
-                        if limit < 50:
-                            return "critical"
-                        elif limit < 80:
-                            return "serious"
-                        elif limit < 100:
-                            return "moderate"
-            return "nominal"
-        except Exception:
-            return "unknown"
-
-    def _get_battery_cycle_count(self) -> Optional[int]:
-        try:
-            out = subprocess.run(
-                ["ioreg", "-r", "-c", "AppleSmartBattery"],
-                capture_output=True, text=True, timeout=3
-            )
-            match = re.search(r'"CycleCount"\s*=\s*(\d+)', out.stdout)
-            if match:
-                return int(match.group(1))
-        except Exception:
-            pass
-        return None
-
-    def _get_fan_speed(self) -> Optional[int]:
-        try:
-            out = subprocess.run(
-                ["ioreg", "-r", "-c", "AppleSMCFanControl"],
-                capture_output=True, text=True, timeout=3
-            )
-            match = re.search(r'"CurrentSpeed"\s*=\s*(\d+)', out.stdout)
-            if match:
-                return int(match.group(1))
-            match = re.search(r'"ActualSpeed"\s*=\s*(\d+)', out.stdout)
-            if match:
-                return int(match.group(1))
-        except Exception:
-            pass
-        return None
-
-    def _get_firewall_enabled(self) -> Optional[bool]:
-        """Get macOS application firewall state."""
-        try:
-            out = subprocess.run(
-                ["/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate"],
-                capture_output=True, text=True, timeout=3
-            )
-            text = f"{out.stdout}\n{out.stderr}".lower()
-            if "disabled" in text:
-                return False
-            if "enabled" in text:
-                return True
-        except Exception:
-            pass
-        return None
-
-    def _get_gatekeeper_enabled(self) -> Optional[bool]:
-        """Get Gatekeeper state from spctl."""
-        try:
-            out = subprocess.run(
-                ["spctl", "--status"],
-                capture_output=True, text=True, timeout=3
-            )
-            text = f"{out.stdout}\n{out.stderr}".lower()
-            if "assessments disabled" in text:
-                return False
-            if "assessments enabled" in text:
-                return True
-        except Exception:
-            pass
-        return None
-
-    def _get_filevault_enabled(self) -> Optional[bool]:
-        """Get FileVault disk encryption state."""
-        try:
-            out = subprocess.run(
-                ["fdesetup", "status"],
-                capture_output=True, text=True, timeout=3
-            )
-            text = f"{out.stdout}\n{out.stderr}".lower()
-            if "filevault is off" in text:
-                return False
-            if "filevault is on" in text:
-                return True
-        except Exception:
-            pass
-        return None
-
-    def _get_ai_processes(self) -> list:
-        """Identify AI-related processes and their resource usage.
-
-        Uses a three-tier detection strategy:
-        - Tier 1: Process names that are unambiguously AI (ollama, llamaserver, etc.)
-        - Tier 2: Generic process names (python, node) that require AI keyword
-                   confirmation in their command line arguments.
-        - Tier 3: Any process with AI keyword in cmdline.
-        """
-        ai_procs = []
-        for proc in psutil.process_iter(["pid", "name", "cmdline", "cpu_percent", "memory_info"]):
-            try:
-                info = proc.info
-                name = (info["name"] or "").lower()
-                cmdline = " ".join(info["cmdline"] or []).lower()
-
-                is_ai = name in self.AI_PROCESS_NAMES
-
-                if not is_ai and name in self.GENERIC_PROCESS_NAMES:
-                    is_ai = any(kw in cmdline for kw in self.AI_CMDLINE_KEYWORDS)
-
-                if not is_ai:
-                    is_ai = any(kw in cmdline for kw in self.AI_CMDLINE_KEYWORDS)
-
-                if is_ai and (info["cpu_percent"] or 0) > 5.0:
-                    mem_mb = round((info["memory_info"].rss if info["memory_info"] else 0) / (1024**2), 1)
-                    ai_procs.append({
-                        "pid": info["pid"],
-                        "name": info["name"],
-                        "cpu": round(info["cpu_percent"] or 0, 1),
-                        "mem_mb": mem_mb,
-                    })
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-
-        return sorted(ai_procs, key=lambda p: p["cpu"], reverse=True)[:10]
-
-
-# ─────────────────────────────────────────────
-# Alert Engine
-# ─────────────────────────────────────────────
-
-class AlertEngine:
-    """Evaluates composite conditions and generates smart alerts."""
-
-    def __init__(self, config: dict):
-        self.config = config
-        self.thresholds = config.get("thresholds", {})
-        self._cooldowns: dict[str, datetime] = {}
-        self._cooldown_minutes = config.get("cooldown_minutes", 10)
-        self._history: deque = deque(maxlen=30)
-        self._session_start: Optional[datetime] = None
-        self._idle_start: Optional[datetime] = None
-
-    def evaluate(self, m: SystemMetrics) -> list[Alert]:
-        self._history.append(m)
-        alerts = []
-
-        # ── Battery Alerts ──
-        if m.battery_percent is not None:
-            if not m.battery_plugged:
-                if m.battery_percent <= self.thresholds.get("battery_critical", 10):
-                    alerts.append(Alert(
-                        level="critical", category="battery_critical",
-                        title="🪫 Battery Critical",
-                        message=f"Battery at {m.battery_percent}% — plug in now!\n"
-                               f"{'~' + str(m.battery_minutes_left) + ' min remaining' if m.battery_minutes_left else ''}",
-                        emoji="🔴", priority=5
-                    ))
-                elif m.battery_percent <= self.thresholds.get("battery_warning", 20):
-                    time_msg = f"\n~{m.battery_minutes_left} min remaining" if m.battery_minutes_left else ""
-                    ai_msg = f"\n{len(m.ai_processes)} AI process(es) running" if m.ai_processes else ""
-                    alerts.append(Alert(
-                        level="warning", category="battery_warning",
-                        title="🔋 Battery Low",
-                        message=f"Battery {m.battery_percent}%, not charging{time_msg}{ai_msg}",
-                        emoji="🟠", priority=4
-                    ))
-
-                # Rapid drain detection (time-based: %/hour)
-                if len(self._history) >= 3:
-                    oldest = self._history[0]
-                    elapsed_hours = (m.timestamp - oldest.timestamp).total_seconds() / 3600
-                    if (elapsed_hours > 0.01
-                            and oldest.battery_percent is not None
-                            and m.battery_percent is not None):
-                        drain_total = oldest.battery_percent - m.battery_percent
-                        drain_per_hour = drain_total / elapsed_hours
-                        threshold = self.thresholds.get("battery_drain_rate", 10)
-                        if drain_per_hour > threshold:
-                            alerts.append(Alert(
-                                level="warning", category="battery_drain",
-                                title="⚡ Rapid Battery Drain",
-                                message=f"Drain rate: {drain_per_hour:.1f}%/hr\n"
-                                       f"({drain_total:.1f}% lost in {elapsed_hours * 60:.0f} min)\n"
-                                       f"AI CPU usage: {m.ai_cpu_total:.0f}%",
-                                emoji="🟠", priority=4
-                            ))
-
-        # ── Thermal Alerts ──
-        if m.cpu_temp is not None:
-            if m.cpu_temp >= self.thresholds.get("temp_critical", 95):
-                alerts.append(Alert(
-                    level="critical", category="temp_critical",
-                    title="🌡️ CPU Overheating!",
-                    message=f"CPU temp {m.cpu_temp}°C — throttling active\n"
-                           f"Thermal: {m.thermal_pressure}\n"
-                           f"{'Fan ' + str(m.fan_speed_rpm) + ' RPM' if m.fan_speed_rpm else ''}",
-                    emoji="🔴", priority=5
-                ))
-            elif m.cpu_temp >= self.thresholds.get("temp_warning", 85):
-                alerts.append(Alert(
-                    level="warning", category="temp_warning",
-                    title="🌡️ CPU Temperature High",
-                    message=f"CPU {m.cpu_temp}°C | Fan {m.fan_speed_rpm or '?'} RPM\n"
-                           f"CPU usage {m.cpu_percent}%",
-                    emoji="🟠", priority=3
-                ))
-
-        elif m.thermal_pressure in ("critical", "serious"):
-            alerts.append(Alert(
-                level="warning", category="thermal_pressure",
-                title="🌡️ System Throttling Detected",
-                message=f"Thermal pressure: {m.thermal_pressure}\n"
-                       f"CPU {m.cpu_percent}% | Memory {m.memory_percent}%",
-                emoji="🟠", priority=4
-            ))
-
-        # ── Memory Alerts ──
-        if m.memory_percent >= self.thresholds.get("memory_critical", 90):
-            alerts.append(Alert(
-                level="warning", category="memory_high",
-                title="💾 Memory Critical",
-                message=f"Memory at {m.memory_percent}% ({m.memory_used_gb}GB)\n"
-                       f"AI processes using {m.ai_memory_total_mb:.0f}MB",
-                emoji="🟠", priority=4
-            ))
-
-        # ── Security Posture ──
-        disabled_controls = []
-        if m.firewall_enabled is False:
-            disabled_controls.append("Firewall")
-        if m.gatekeeper_enabled is False:
-            disabled_controls.append("Gatekeeper")
-        if m.filevault_enabled is False:
-            disabled_controls.append("FileVault")
-
-        if disabled_controls:
-            alerts.append(Alert(
-                level="warning", category="security_posture",
-                title="🛡️ Security Posture Risk",
-                message=f"Disabled protections: {', '.join(disabled_controls)}\n"
-                       f"Re-enable them to reduce security exposure.",
-                emoji="🟠", priority=4
-            ))
-
-        # ── AI Process Alerts ──
-        if m.ai_processes:
-            if self._session_start is None:
-                self._session_start = m.timestamp
-                self._idle_start = None
-
-            if self._session_start:
-                duration = (m.timestamp - self._session_start).total_seconds() / 3600
-                session_limit = self.thresholds.get("session_hours_warning", 3)
-                if duration >= session_limit:
-                    top = m.ai_processes[0]
-                    alerts.append(Alert(
-                        level="info", category="long_session",
-                        title="⏰ Long AI Session",
-                        message=f"AI session running for {duration:.1f}h\n"
-                               f"Top: {top['name']} (CPU {top['cpu']}%, MEM {top['mem_mb']}MB)",
-                        emoji="🟡", priority=3
-                    ))
-
-            if len(self._history) >= 5:
-                recent = list(self._history)[-5:]
-                avg_cpu = sum(h.ai_cpu_total for h in recent) / len(recent)
-                avg_net = sum(h.net_sent_mb + h.net_recv_mb for h in recent) / len(recent)
-                if avg_cpu > 50 and avg_net < 0.1:
-                    alerts.append(Alert(
-                        level="warning", category="stuck_process",
-                        title="🔄 Suspected Stuck Process",
-                        message=f"AI process using {avg_cpu:.0f}% CPU\n"
-                               f"but near-zero network I/O — possible infinite loop",
-                        emoji="🟠", priority=4
-                    ))
-
-        else:
-            if self._session_start:
-                duration = (m.timestamp - self._session_start).total_seconds() / 60
-                if duration > 5:
-                    alerts.append(Alert(
-                        level="info", category="session_end",
-                        title="✅ AI Session Ended",
-                        message=f"Session duration: {duration:.0f} min",
-                        emoji="✅", priority=2
-                    ))
-                self._session_start = None
-
-            self._idle_start = self._idle_start or m.timestamp
-
-        # ── Night Watch ──
-        hour = m.timestamp.hour
-        if (0 <= hour <= 6) and m.ai_processes and not m.battery_plugged:
-            alerts.append(Alert(
-                level="warning", category="night_watch",
-                title="🌙 Unattended Night Session",
-                message=f"{hour}:00 AM — AI session active + battery {m.battery_percent}%\n"
-                       f"Charger not connected",
-                emoji="🟡", priority=4
-            ))
-
-        # ── Disk Alert ──
-        disk_threshold = self.thresholds.get("disk_critical", 90)
-        if m.disk_percent >= disk_threshold:
-            alerts.append(Alert(
-                level="warning", category="disk_high",
-                title="💿 Disk Space Low",
-                message=f"Disk usage at {m.disk_percent}%\n"
-                       f"Remaining: {m.disk_free_gb}GB",
-                emoji="🟠", priority=4
-            ))
-
-        # ── Network Spike ──
-        total_mb = m.net_sent_mb + m.net_recv_mb
-        net_threshold = self.thresholds.get("network_spike_mb", 100)
-        if total_mb > net_threshold:
-            alerts.append(Alert(
-                level="info", category="network_spike",
-                title="📡 Network Traffic Spike",
-                message=f"This interval: ↑{m.net_sent_mb:.1f}MB ↓{m.net_recv_mb:.1f}MB\n"
-                       f"Total {total_mb:.1f}MB",
-                emoji="🟡", priority=3
-            ))
-
-        return self._apply_cooldowns(alerts, now=m.timestamp)
-
-    def _apply_cooldowns(self, alerts: list[Alert], now: Optional[datetime] = None) -> list[Alert]:
-        """Prevent alert spam by enforcing cooldown per category."""
-        now = now or datetime.now()
-        filtered = []
-        for alert in alerts:
-            last = self._cooldowns.get(alert.category)
-            cooldown = self._cooldown_minutes
-            if alert.level == "critical":
-                cooldown = max(2, cooldown // 3)
-
-            if last is None or (now - last).total_seconds() > cooldown * 60:
-                filtered.append(alert)
-                self._cooldowns[alert.category] = now
-        return filtered
-
-
-# ─────────────────────────────────────────────
-# Notifier
-# ─────────────────────────────────────────────
-
-class NtfyNotifier:
-    """Sends push notifications via ntfy.sh with retry queue."""
-
-    PRIORITY_MAP = {1: "min", 2: "low", 3: "default", 4: "high", 5: "urgent"}
-    MAX_RETRIES = 3
-    RETRY_QUEUE_SIZE = 50
-
-    def __init__(self, config: dict):
-        self.topic = config.get("ntfy_topic", "sentinel-default")
-        self.server = config.get("ntfy_server", "https://ntfy.sh")
-        self.enabled = config.get("notifications_enabled", True)
-        self._retry_queue: deque = deque(maxlen=self.RETRY_QUEUE_SIZE)
-
-    def send(self, alert: Alert):
-        if not self.enabled:
-            return
-
-        self._flush_retries()
-
-        if not self._do_send(alert):
-            self._retry_queue.append((alert, 1))
-
-    def _do_send(self, alert: Alert) -> bool:
-        url = f"{self.server}/{self.topic}"
-        headers = {
-            "Title": alert.title,
-            "Priority": self.PRIORITY_MAP.get(alert.priority, "default"),
-            "Tags": f"{alert.emoji},{alert.category}",
-        }
-
-        try:
-            resp = requests.post(url, data=alert.message.encode("utf-8"),
-                                 headers=headers, timeout=10)
-            if resp.status_code == 200:
-                logging.info(f"📤 Alert sent: {alert.title}")
-                return True
-            else:
-                logging.warning(f"ntfy error: {resp.status_code}")
-                return False
-        except Exception as e:
-            logging.error(f"ntfy send failed: {e}")
-            return False
-
-    def _flush_retries(self):
-        """Attempt to resend queued alerts."""
-        if not self._retry_queue:
-            return
-
-        remaining = deque(maxlen=self.RETRY_QUEUE_SIZE)
-        while self._retry_queue:
-            alert, attempt = self._retry_queue.popleft()
-            if self._do_send(alert):
-                logging.info(f"📤 Retry succeeded: {alert.title} (attempt {attempt})")
-            elif attempt < self.MAX_RETRIES:
-                remaining.append((alert, attempt + 1))
-            else:
-                logging.error(f"📤 Retry exhausted, dropping: {alert.title}")
-        self._retry_queue = remaining
-
-    def send_status(self, m: SystemMetrics):
-        """Send a periodic status summary."""
-        lines = [
-            f"CPU: {m.cpu_percent}%{f' | {m.cpu_temp}°C' if m.cpu_temp else ''}",
-            f"MEM: {m.memory_percent}% ({m.memory_used_gb}GB)",
-            f"DISK: {m.disk_percent}% ({m.disk_free_gb}GB free)",
-        ]
-        if m.battery_percent is not None:
-            plug = "🔌" if m.battery_plugged else "🔋"
-            lines.append(f"BAT: {plug} {m.battery_percent}%"
-                        f"{f' ({m.battery_minutes_left} min)' if m.battery_minutes_left else ''}")
-        if m.fan_speed_rpm:
-            lines.append(f"FAN: {m.fan_speed_rpm} RPM")
-        security = []
-        if m.firewall_enabled is not None:
-            security.append(f"FW {'ON' if m.firewall_enabled else 'OFF'}")
-        if m.gatekeeper_enabled is not None:
-            security.append(f"GK {'ON' if m.gatekeeper_enabled else 'OFF'}")
-        if m.filevault_enabled is not None:
-            security.append(f"FV {'ON' if m.filevault_enabled else 'OFF'}")
-        if security:
-            lines.append(f"SEC: {' | '.join(security)}")
-        if m.ai_processes:
-            lines.append(f"AI: {len(m.ai_processes)} process(es), CPU {m.ai_cpu_total:.0f}%")
-            top = m.ai_processes[0]
-            lines.append(f"  Top: {top['name']} ({top['cpu']}%)")
-
-        message = "\n".join(lines)
-        alert = Alert(
-            level="info", category="status",
-            title="📊 Sentinel Status Report",
-            message=message,
-            priority=1
-        )
-        self.send(alert)
-
-
-# ─────────────────────────────────────────────
 # Main Daemon
 # ─────────────────────────────────────────────
 
@@ -785,7 +193,27 @@ class Sentinel:
 
         self.collector = MacOSCollector()
         self.engine = AlertEngine(self.config)
-        self.notifier = NtfyNotifier(self.config)
+        self.notifier = NotificationManager(self.config)
+        self._event_logger = EventLogger(self._data_dir)
+
+        # Security layer — event queue shared between collectors and main loop
+        self._security_queue: queue.Queue = queue.Queue(maxsize=1000)
+        self._fs_watcher: FSWatcher | None = None
+        self._net_tracker: NetTracker | None = None
+        self._agent_log_parser: AgentLogParser | None = None
+
+        # Start security collectors if enabled
+        sec_config = self.config.get("security", {})
+        if sec_config.get("enabled", False):
+            fs_config = sec_config.get("fs_watcher", {})
+            if fs_config.get("enabled", True):
+                self._fs_watcher = FSWatcher(self.config, self._security_queue)
+            net_config = sec_config.get("net_tracker", {})
+            if net_config.get("enabled", True):
+                self._net_tracker = NetTracker(self.config, self._security_queue)
+            agent_config = sec_config.get("agent_logs", {})
+            if agent_config.get("enabled", True):
+                self._agent_log_parser = AgentLogParser(self.config, self._security_queue)
 
         self.interval = self.config.get("check_interval_seconds", 30)
         self.status_interval = self.config.get("status_interval_minutes", 60)
@@ -808,24 +236,36 @@ class Sentinel:
             sys.exit(1)
 
     def _shutdown(self, signum, frame):
-        logging.info("🛑 Sentinel shutting down...")
+        logging.info("\U0001f6d1 Sentinel shutting down...")
         self._running = False
+        if self._fs_watcher:
+            self._fs_watcher.stop()
+        if self._agent_log_parser:
+            self._agent_log_parser.stop()
+        self._event_logger.close()
         if self._pid_file:
             fcntl.flock(self._pid_file, fcntl.LOCK_UN)
             self._pid_file.close()
 
     def run(self):
-        logging.info(f"🚀 Sentinel started — topic: {self.config.get('ntfy_topic')}")
+        channels = self.notifier.channel_names
+        logging.info(f"\U0001f680 Sentinel started — channels: {', '.join(channels)}")
         logging.info(f"   Check interval: {self.interval}s")
         logging.info(f"   Status report every: {self.status_interval}min")
 
         self.notifier.send(Alert(
             level="info", category="startup",
-            title="🚀 Sentinel Started",
+            title="\U0001f680 Sentinel Started",
             message=f"Check interval: {self.interval}s\n"
                    f"Status report every {self.status_interval} min",
             priority=2
         ))
+
+        # Start security layer collectors
+        if self._fs_watcher:
+            self._fs_watcher.start()
+        if self._agent_log_parser:
+            self._agent_log_parser.start()
 
         while self._running:
             try:
@@ -833,17 +273,24 @@ class Sentinel:
 
                 logging.info(
                     f"CPU:{metrics.cpu_percent}% "
-                    f"{'T:' + str(metrics.cpu_temp) + '°C ' if metrics.cpu_temp else ''}"
+                    f"{'T:' + str(metrics.cpu_temp) + '\u00b0C ' if metrics.cpu_temp else ''}"
                     f"MEM:{metrics.memory_percent}% "
                     f"DISK:{metrics.disk_percent}% "
-                    f"BAT:{'🔌' if metrics.battery_plugged else '🔋'}{metrics.battery_percent}% "
+                    f"BAT:{'\U0001f50c' if metrics.battery_plugged else '\U0001f50b'}{metrics.battery_percent}% "
                     f"AI:{len(metrics.ai_processes)}procs"
                 )
 
                 alerts = self.engine.evaluate(metrics)
                 for alert in alerts:
-                    logging.warning(f"🚨 {alert.level}: {alert.title}")
+                    logging.warning(f"\U0001f6a8 {alert.level}: {alert.title}")
                     self.notifier.send(alert)
+
+                # Poll network connections (polling-based, runs in main loop)
+                if self._net_tracker:
+                    self._net_tracker.poll()
+
+                # Drain security event queue
+                self._process_security_events()
 
                 now = datetime.now()
                 if (now - self._last_status).total_seconds() > self.status_interval * 60:
@@ -856,6 +303,21 @@ class Sentinel:
             time.sleep(self.interval)
 
         logging.info("Sentinel stopped.")
+
+    def _process_security_events(self):
+        """Drain the security event queue, log to JSONL, and generate alerts."""
+        processed = 0
+        while not self._security_queue.empty() and processed < 100:
+            try:
+                event = self._security_queue.get_nowait()
+                self._event_logger.log(event)
+                alerts = self.engine.evaluate_security_event(event)
+                for alert in alerts:
+                    logging.warning(f"\U0001f6a8 [security] {alert.level}: {alert.title}")
+                    self.notifier.send(alert)
+                processed += 1
+            except queue.Empty:
+                break
 
 
 # ─────────────────────────────────────────────
@@ -882,18 +344,19 @@ def main():
         if config_file.exists():
             print(f"Config already exists: {config_file}")
         else:
-            import secrets
-            topic = f"sentinel-{secrets.token_hex(4)}"
-            config_content = f"""# Sentinel — Configuration
+            config_content = """# Sentinel — Configuration
 # Generated by: sentinel --init-config
-
-ntfy_topic: "{topic}"
-ntfy_server: "https://ntfy.sh"
-notifications_enabled: true
 
 check_interval_seconds: 30
 status_interval_minutes: 60
 cooldown_minutes: 10
+
+# Notification channels — value means enabled, empty means disabled.
+notifications:
+  macos: true                  # macOS native (works out of the box)
+  ntfy_topic: ""               # ntfy.sh topic (set to enable)
+  ntfy_server: "https://ntfy.sh"
+  slack_webhook: ""            # Slack webhook URL (set to enable)
 
 thresholds:
   battery_warning: 20
@@ -908,8 +371,8 @@ thresholds:
 """
             config_file.write_text(config_content)
             print(f"Config created: {config_file}")
-            print(f"Your ntfy topic: {topic}")
-            print(f"Subscribe to this topic in the ntfy app on your phone.")
+            print(f"macOS native notifications enabled by default.")
+            print(f"Edit {config_file} to add ntfy.sh or Slack.")
         return
 
     if args.once:
@@ -919,11 +382,11 @@ thresholds:
         print(f"  Sentinel — System Snapshot")
         print(f"  {m.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*50}")
-        print(f"  CPU:     {m.cpu_percent}%{f'  |  {m.cpu_temp}°C' if m.cpu_temp else ''}")
+        print(f"  CPU:     {m.cpu_percent}%{f'  |  {m.cpu_temp}\u00b0C' if m.cpu_temp else ''}")
         print(f"  Thermal: {m.thermal_pressure}")
         print(f"  Memory:  {m.memory_percent}% ({m.memory_used_gb}GB)")
         if m.battery_percent is not None:
-            plug = "charging 🔌" if m.battery_plugged else "on battery 🔋"
+            plug = "charging \U0001f50c" if m.battery_plugged else "on battery \U0001f50b"
             print(f"  Battery: {m.battery_percent}% ({plug})")
             if m.battery_minutes_left:
                 print(f"           ~{m.battery_minutes_left} min remaining")
@@ -941,7 +404,7 @@ thresholds:
             security.append(f"FileVault {'ON' if m.filevault_enabled else 'OFF'}")
         if security:
             print(f"  Security: {' | '.join(security)}")
-        print(f"  Network: ↑{m.net_sent_mb}MB ↓{m.net_recv_mb}MB")
+        print(f"  Network: \u2191{m.net_sent_mb}MB \u2193{m.net_recv_mb}MB")
         if m.ai_processes:
             print(f"\n  AI Processes ({len(m.ai_processes)}):")
             for p in m.ai_processes[:5]:
@@ -954,15 +417,16 @@ thresholds:
     if args.test_notify:
         resolved = resolve_config_path(args.config)
         config = load_config(resolved)
-        notifier = NtfyNotifier(config)
-        notifier.send(Alert(
-            level="info", category="test",
-            title="🧪 Sentinel Test",
-            message="Notification delivered successfully! ✅\n"
-                   f"Topic: {config.get('ntfy_topic')}",
-            priority=3
-        ))
-        print("✅ Test notification sent!")
+        notifier = NotificationManager(config)
+        test_alert = Alert(
+            level="critical", category="test",
+            title="\U0001f9ea Sentinel Test",
+            message="Notification delivered successfully! \u2705\n"
+                   f"Active channels: {', '.join(notifier.channel_names)}",
+            priority=5
+        )
+        notifier.send(test_alert)
+        print(f"\u2705 Test notification sent to: {', '.join(notifier.channel_names)}")
         return
 
     sentinel = Sentinel(config_path=args.config)

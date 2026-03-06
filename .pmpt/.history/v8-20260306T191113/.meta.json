@@ -1,0 +1,20 @@
+{
+  "version": 8,
+  "timestamp": "20260306T191113",
+  "files": [
+    "ai-security-layer-spec.md",
+    "plan.md",
+    "pmpt.ai.md",
+    "pmpt.md"
+  ],
+  "changedFiles": [
+    "pmpt.md"
+  ],
+  "note": "Backfilled all 7 snapshot versions with detailed progress notes for publish readiness. Each version now has a descriptive summary covering what was built, why, and key technical decisions — from initial setup through security posture monitoring, AI security layer foundation, FSWatcher, NetTracker, AgentLogParser, JSONL event logging, and multi-channel notifications with critical-only alerting.",
+  "git": {
+    "commit": "8f3a277",
+    "commitFull": "8f3a2779273047d54d40d66506f43f56b1719d95",
+    "branch": "main",
+    "dirty": true
+  }
+}

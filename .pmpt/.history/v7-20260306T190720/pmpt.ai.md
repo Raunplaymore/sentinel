@@ -136,13 +136,13 @@ Dev: pytest>=7.0
 - All security collectors gracefully handle missing paths/permissions (warn, don't crash)
 - NotificationManager auto-detects channels from config values (no explicit enable flags)
 
-## What's Next (macOS 집중, Linux 미지원 — AD-13)
+## What's Next (pending tasks)
 
-1. **MCP 인젝션 감지** -- AgentLogParser 확장, MCP 서버 호출에서 인젝션 패턴 탐지. Sentinel 핵심 차별점.
-2. **pyproject.toml 버전 업데이트** -- security layer 추가 + watchdog 의존성 반영
-3. **README 업데이트** -- AI Security Layer 기능 문서화
-4. **Cursor / VS Code Continue 로그 파서** -- AgentLogParser에 parser type 추가
-5. **Team dashboard** -- JSONL upload + web aggregation (Phase 2, 후순위)
+1. **Cursor/VS Code log parser** -- Extend AgentLogParser with additional parser types
+2. **MCP injection detection** -- Pattern matching on MCP server calls in agent logs (Phase 3)
+3. **pyproject.toml version bump** -- Update to reflect security layer additions + watchdog dep
+4. **Telegram notification channel** -- Phase 2
+5. **Team dashboard** -- JSONL upload + web aggregation (Phase 2)
 
 ---
 

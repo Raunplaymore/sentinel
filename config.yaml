@@ -2,39 +2,96 @@
 # Sentinel — Configuration
 # ───────────────────────────────────────
 
-# ntfy.sh 설정 (install.sh에서 자동 생성됨)
-ntfy_topic: "sentinel-CHANGE-ME"
-ntfy_server: "https://ntfy.sh"
-notifications_enabled: true
-
-# 모니터링 간격 (초)
+# Monitoring interval (seconds)
 check_interval_seconds: 30
 
-# 상태 리포트 간격 (분) — 0이면 비활성화
+# Status report interval (minutes) — 0 to disable
 status_interval_minutes: 60
 
-# 알림 쿨다운 (분) — 같은 카테고리 알림 반복 방지
+# Alert cooldown (minutes) — prevents repeated alerts in the same category
 cooldown_minutes: 10
 
-# ── 임계값 ──
-thresholds:
-  # 배터리
-  battery_warning: 20          # % 이하일 때 경고
-  battery_critical: 10         # % 이하일 때 긴급
-  battery_drain_rate: 10       # 최근 5회 측정간 % 감소량
+# ── Notification Channels ──
+# If a value is set, the channel is active. No separate on/off switches.
+notifications:
+  macos: true                  # macOS native notification (default, no setup needed)
+  ntfy_topic: ""               # ntfy.sh topic (set to enable)
+  ntfy_server: "https://ntfy.sh"
+  slack_webhook: ""            # Slack webhook URL (set to enable)
+  telegram_bot_token: ""       # Telegram Bot token (set to enable)
+  telegram_chat_id: ""         # Telegram Chat ID
 
-  # 온도
+# ── Thresholds ──
+thresholds:
+  # Battery
+  battery_warning: 20          # % level
+  battery_critical: 10         # % level
+  battery_drain_rate: 10       # % drop over last 5 measurements
+
+  # Temperature
   temp_warning: 85             # °C
   temp_critical: 95            # °C
 
-  # 메모리
-  memory_critical: 90          # % 사용률
+  # Memory
+  memory_critical: 90          # % usage
 
-  # 디스크
-  disk_critical: 90            # % 사용률
+  # Disk
+  disk_critical: 90            # % usage
 
-  # 네트워크
-  network_spike_mb: 100        # 측정 간격당 MB
+  # Network
+  network_spike_mb: 100        # MB per check interval
 
-  # 세션
-  session_hours_warning: 3     # 시간 이상 연속 세션 시 알림
+  # Session
+  session_hours_warning: 3     # Alert after N hours of continuous AI session
+
+# ── AI Security Layer ──
+security:
+  enabled: true
+
+  fs_watcher:
+    enabled: true
+    watch_paths:
+      - "~"                          # Watch entire home directory
+    sensitive_paths:
+      - "~/.ssh"                     # SSH keys
+      - "~/.env"                     # Environment variables
+      - "~/.config"                  # Config files
+      - "~/.zshrc"                   # Shell config
+      - "~/.bash_profile"
+      - "~/.gitconfig"              # Git config
+    ignore_patterns:
+      - "*.pyc"
+      - "__pycache__"
+      - "node_modules"
+      - ".git/objects"
+      - ".git/index"
+      - "*.swp"
+      - "*.tmp"
+      - ".DS_Store"
+    bulk_threshold: 50               # Alert when N+ files change
+    bulk_window_seconds: 30          # Time window for bulk detection
+
+  net_tracker:
+    enabled: true
+    alert_on_unknown: true           # Alert on connections outside allowlist
+    allowlist:
+      - "api.anthropic.com"
+      - "api.openai.com"
+      - "*.github.com"
+      - "*.githubusercontent.com"
+      - "pypi.org"
+      - "files.pythonhosted.org"
+      - "registry.npmjs.org"
+      - "ntfy.sh"
+      - "*.amazonaws.com"
+      - "*.cloudfront.net"
+      - "*.google.com"
+      - "*.googleapis.com"
+
+  agent_logs:
+    enabled: true
+    parsers:
+      - type: "claude_code"
+        log_dir: "~/.claude/projects"    # Claude Code JSONL session logs
+      # - type: "cursor"
+      #   log_dir: "~/Library/Application Support/Cursor/User/workspaceStorage"

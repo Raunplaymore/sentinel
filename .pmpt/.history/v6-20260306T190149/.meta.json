@@ -1,0 +1,19 @@
+{
+  "version": 6,
+  "timestamp": "20260306T190149",
+  "files": [
+    "ai-security-layer-spec.md",
+    "plan.md",
+    "pmpt.ai.md",
+    "pmpt.md"
+  ],
+  "changedFiles": [
+    "pmpt.md"
+  ],
+  "git": {
+    "commit": "8f3a277",
+    "commitFull": "8f3a2779273047d54d40d66506f43f56b1719d95",
+    "branch": "main",
+    "dirty": true
+  }
+}

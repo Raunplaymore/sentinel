@@ -1,0 +1,20 @@
+{
+  "version": 10,
+  "timestamp": "20260306T192940",
+  "files": [
+    "ai-security-layer-spec.md",
+    "plan.md",
+    "pmpt.ai.md",
+    "pmpt.md"
+  ],
+  "changedFiles": [
+    "pmpt.md"
+  ],
+  "note": "Implemented three major features: (1) MCP injection detection with 10 compiled patterns scanning tool_result responses for prompt injection (system tags, instruction overrides, role hijacking, concealment, HTML injection, urgency manipulation, token boundaries, fake system prompts) — triggers critical alerts. MCP tool calls are also tracked as informational events. (2) Cursor log parser support via workspaceStorage scanning for AI conversation JSONL/JSON files. (3) Telegram notification channel using Bot API with \"value means enabled\" pattern (bot_token + chat_id). Also bumped version to 0.3.0, added watchdog dependency, and updated README with MCP injection docs and Telegram setup. 180 tests passing (+25 new).",
+  "git": {
+    "commit": "8f3a277",
+    "commitFull": "8f3a2779273047d54d40d66506f43f56b1719d95",
+    "branch": "main",
+    "dirty": true
+  }
+}
