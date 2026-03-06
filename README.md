@@ -232,6 +232,8 @@ This prevents generic `node` or `python3` processes from triggering AI-specific 
 
 ```bash
 sentinel --once            # One-shot system snapshot
+sentinel --report          # Today's event summary
+sentinel --report 7        # Last 7 days event summary
 sentinel --test-notify     # Send test notification to all active channels
 sentinel --init-config     # Generate config at ~/.config/sentinel/config.yaml
 sentinel --version         # Show version

@@ -11,7 +11,7 @@ import sys
 import os
 import fcntl
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
@@ -324,6 +324,92 @@ class Sentinel:
 
 
 # ─────────────────────────────────────────────
+# Report
+# ─────────────────────────────────────────────
+
+def generate_report(days: int = 1) -> None:
+    """Read JSONL event logs and print a summary report."""
+    import json as _json
+    from collections import Counter
+
+    data_dir = resolve_data_dir()
+    events_dir = data_dir / "events"
+
+    if not events_dir.exists():
+        print("No event logs found.")
+        return
+
+    today = datetime.now()
+    start_date = today - timedelta(days=days - 1)
+
+    # Collect events from date range
+    events = []
+    for d in range(days):
+        date = start_date + timedelta(days=d)
+        filepath = events_dir / "{}.jsonl".format(date.strftime("%Y-%m-%d"))
+        if not filepath.exists():
+            continue
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        events.append(_json.loads(line))
+                    except _json.JSONDecodeError:
+                        pass
+
+    if not events:
+        print("No events recorded in the selected period.")
+        return
+
+    # Classify by risk_score
+    critical = [e for e in events if e.get("risk_score", 0) >= 0.8]
+    warning = [e for e in events if 0.4 <= e.get("risk_score", 0) < 0.8]
+    info = [e for e in events if e.get("risk_score", 0) < 0.4]
+
+    # Top sources
+    source_counts = Counter(e.get("source", "unknown") for e in events)
+
+    # Notable events (critical, most recent first)
+    notable = sorted(critical, key=lambda e: e.get("ts", ""), reverse=True)[:5]
+
+    # Format
+    period_start = start_date.strftime("%Y-%m-%d")
+    period_end = today.strftime("%Y-%m-%d")
+    period_label = period_start if days == 1 else "{} ~ {}".format(period_start, period_end)
+
+    print("")
+    print("=" * 50)
+    print("  Sentinel Report")
+    print("  {}".format(period_label))
+    print("=" * 50)
+    print("")
+    print("  Events: {} total".format(len(events)))
+    print("    Critical: {:>4}".format(len(critical)))
+    print("    Warning:  {:>4}".format(len(warning)))
+    print("    Info:     {:>4}".format(len(info)))
+    print("")
+    print("  Top Sources:")
+    for source, count in source_counts.most_common(5):
+        print("    {:<20s} {}".format(source, count))
+
+    if notable:
+        print("")
+        print("  Notable Events:")
+        for e in notable:
+            ts = e.get("ts", "?")[:16]
+            source = e.get("source", "?")
+            target = e.get("target", "?")
+            if len(target) > 60:
+                target = target[:57] + "..."
+            print("    {} | [{}] {}".format(ts, source, target))
+
+    print("")
+    print("=" * 50)
+    print("")
+
+
+# ─────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────
 
@@ -336,9 +422,15 @@ def main():
     parser.add_argument("--once", action="store_true", help="Run once and print metrics")
     parser.add_argument("--test-notify", action="store_true", help="Send test notification")
     parser.add_argument("--version", "-v", action="version", version=f"sentinel-mac {__version__}")
+    parser.add_argument("--report", nargs="?", const=1, type=int, metavar="DAYS",
+                        help="Show event summary (default: today, or specify number of days)")
     parser.add_argument("--init-config", action="store_true",
                         help="Generate config.yaml in ~/.config/sentinel/")
     args = parser.parse_args()
+
+    if args.report is not None:
+        generate_report(args.report)
+        return
 
     if args.init_config:
         config_dir = Path.home() / ".config" / "sentinel"
