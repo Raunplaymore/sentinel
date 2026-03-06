@@ -243,7 +243,7 @@ class Sentinel:
         if self._agent_log_parser:
             self._agent_log_parser.stop()
         self._event_logger.close()
-        if self._pid_file:
+        if self._pid_file and not self._pid_file.closed:
             fcntl.flock(self._pid_file, fcntl.LOCK_UN)
             self._pid_file.close()
 
