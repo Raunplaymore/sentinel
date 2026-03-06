@@ -23,7 +23,7 @@ echo -e "${CYAN}╚════════════════════�
 echo ""
 
 # ── Step 1: Check Python ──
-echo -e "${YELLOW}[1/5]${NC} Checking Python..."
+echo -e "${YELLOW}[1/6]${NC} Checking Python..."
 if command -v python3 &>/dev/null; then
     PY=$(python3 --version)
     echo -e "  ✅ $PY"
@@ -33,7 +33,7 @@ else
 fi
 
 # ── Step 2: Create venv & install deps ──
-echo -e "${YELLOW}[2/5]${NC} Setting up virtual environment..."
+echo -e "${YELLOW}[2/6]${NC} Setting up virtual environment..."
 if [ ! -d "$VENV_DIR" ]; then
     python3 -m venv "$VENV_DIR"
     echo -e "  ✅ venv created"
@@ -46,8 +46,20 @@ pip install --quiet --upgrade pip
 pip install --quiet "$SCRIPT_DIR"
 echo -e "  ✅ Dependencies installed"
 
-# ── Step 3: Generate unique topic ──
-echo -e "${YELLOW}[3/5]${NC} Configuring ntfy.sh topic..."
+# ── Step 3: Install terminal-notifier ──
+echo -e "${YELLOW}[3/6]${NC} Setting up macOS notifications..."
+if command -v terminal-notifier &>/dev/null; then
+    echo -e "  ✅ terminal-notifier already installed"
+elif command -v brew &>/dev/null; then
+    brew install --quiet terminal-notifier
+    echo -e "  ✅ terminal-notifier installed via Homebrew"
+else
+    echo -e "  ⚠️  Homebrew not found — falling back to osascript for notifications"
+    echo -e "     For reliable alerts, install Homebrew then run: brew install terminal-notifier"
+fi
+
+# ── Step 4: Generate unique topic ──
+echo -e "${YELLOW}[4/6]${NC} Configuring ntfy.sh topic..."
 EXISTING_TOPIC=$(grep "ntfy_topic:" "$SCRIPT_DIR/config.yaml" | awk '{print $2}' | tr -d '"')
 
 if [ "$EXISTING_TOPIC" = "sentinel-CHANGE-ME" ] || [ -z "$EXISTING_TOPIC" ]; then
@@ -61,8 +73,8 @@ else
     echo -e "  ✅ Using existing topic: ${GREEN}${TOPIC}${NC}"
 fi
 
-# ── Step 4: Setup launchd ──
-echo -e "${YELLOW}[4/5]${NC} Registering auto-start service..."
+# ── Step 5: Setup launchd ──
+echo -e "${YELLOW}[5/6]${NC} Registering auto-start service..."
 mkdir -p "$HOME/Library/LaunchAgents"
 
 cat > "$PLIST_PATH" << EOF
@@ -96,8 +108,8 @@ EOF
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
 echo -e "  ✅ LaunchAgent registered"
 
-# ── Step 5: Test & Start ──
-echo -e "${YELLOW}[5/5]${NC} Testing & starting..."
+# ── Step 6: Test & Start ──
+echo -e "${YELLOW}[6/6]${NC} Testing & starting..."
 mkdir -p "$SCRIPT_DIR/logs"
 
 # Quick test
