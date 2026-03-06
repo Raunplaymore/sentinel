@@ -6,7 +6,7 @@ Files are stored at: <data_dir>/events/YYYY-MM-DD.jsonl
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sentinel_mac.models import SecurityEvent
@@ -17,9 +17,12 @@ logger = logging.getLogger(__name__)
 class EventLogger:
     """Append-only JSONL event logger with daily rotation."""
 
-    def __init__(self, data_dir):
+    DEFAULT_RETENTION_DAYS = 30
+
+    def __init__(self, data_dir, retention_days=None):
         self._events_dir = Path(data_dir) / "events"
         self._events_dir.mkdir(parents=True, exist_ok=True)
+        self._retention_days = retention_days or self.DEFAULT_RETENTION_DAYS
         self._current_date: str = ""
         self._current_file = None
 
@@ -39,12 +42,25 @@ class EventLogger:
             logger.error(f"Failed to write event log: {e}")
 
     def _rotate(self, date_str: str) -> None:
-        """Open a new daily log file."""
+        """Open a new daily log file and clean up old ones."""
         if self._current_file:
             self._current_file.close()
         path = self._events_dir / f"{date_str}.jsonl"
         self._current_file = open(path, "a", encoding="utf-8")
         self._current_date = date_str
+        self._cleanup()
+
+    def _cleanup(self) -> None:
+        """Delete JSONL files older than retention_days."""
+        cutoff = datetime.now() - timedelta(days=self._retention_days)
+        for f in self._events_dir.glob("*.jsonl"):
+            try:
+                file_date = datetime.strptime(f.stem, "%Y-%m-%d")
+                if file_date < cutoff:
+                    f.unlink()
+                    logger.info(f"Deleted old event log: {f.name}")
+            except ValueError:
+                pass
 
     def close(self) -> None:
         """Close the current file handle."""
