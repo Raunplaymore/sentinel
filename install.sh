@@ -110,6 +110,20 @@ mkdir -p "$SCRIPT_DIR/logs"
 launchctl load "$PLIST_PATH"
 echo -e "  ✅ Sentinel service started"
 
+# ── Step 6: Add shell alias ──
+SHELL_RC="$HOME/.zshrc"
+[ -f "$HOME/.bashrc" ] && [ ! -f "$HOME/.zshrc" ] && SHELL_RC="$HOME/.bashrc"
+
+ALIAS_LINE="alias sentinel=\"${VENV_DIR}/bin/sentinel --config ${SCRIPT_DIR}/config.yaml\""
+if grep -q "alias sentinel=" "$SHELL_RC" 2>/dev/null; then
+    echo -e "  ✅ Alias already exists in $(basename $SHELL_RC)"
+else
+    echo "" >> "$SHELL_RC"
+    echo "# Sentinel — AI Security Guardian" >> "$SHELL_RC"
+    echo "$ALIAS_LINE" >> "$SHELL_RC"
+    echo -e "  ✅ Alias added to $(basename $SHELL_RC) — restart terminal or run: source $SHELL_RC"
+fi
+
 # ── Done! ──
 echo ""
 echo -e "${GREEN}══════════════════════════════════════${NC}"
@@ -127,11 +141,15 @@ echo -e "     ${GREEN}${TOPIC}${NC}"
 echo ""
 echo -e "  Done! Alerts will arrive automatically."
 echo ""
-echo -e "  ${YELLOW}Useful commands:${NC}"
-echo -e "  Status check:    $VENV_DIR/bin/sentinel --config $SCRIPT_DIR/config.yaml --once"
-echo -e "  Test alert:      $VENV_DIR/bin/sentinel --config $SCRIPT_DIR/config.yaml --test-notify"
-echo -e "  View logs:       tail -f $SCRIPT_DIR/logs/sentinel.log"
-echo -e "  Stop service:    launchctl unload $PLIST_PATH"
-echo -e "  Start service:   launchctl load $PLIST_PATH"
-echo -e "  Uninstall:       bash $SCRIPT_DIR/uninstall.sh"
+echo -e "  ${YELLOW}Useful commands (restart terminal first):${NC}"
+echo -e "  sentinel --once          System snapshot"
+echo -e "  sentinel --report        Today's event summary"
+echo -e "  sentinel --report 7      Last 7 days summary"
+echo -e "  sentinel --test-notify   Test alert to all channels"
+echo -e "  sentinel --help          All options"
+echo -e ""
+echo -e "  ${YELLOW}Service control:${NC}"
+echo -e "  launchctl unload $PLIST_PATH   Stop"
+echo -e "  launchctl load $PLIST_PATH     Start"
+echo -e "  bash $SCRIPT_DIR/uninstall.sh         Uninstall"
 echo ""
