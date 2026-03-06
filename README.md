@@ -56,7 +56,35 @@ This creates an isolated venv at `~/.sentinel-venv`, installs all dependencies, 
 python3 -m venv ~/.sentinel-venv
 ~/.sentinel-venv/bin/pip install sentinel-mac
 ~/.sentinel-venv/bin/sentinel --init-config
-~/.sentinel-venv/bin/sentinel
+~/.sentinel-venv/bin/sentinel              # Run in foreground
+```
+
+To auto-start on login, register with launchd:
+
+```bash
+# Create the LaunchAgent plist
+cat > ~/Library/LaunchAgents/com.sentinel.agent.plist << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sentinel.agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$HOME/.sentinel-venv/bin/sentinel</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+EOF
+
+# Start the service
+launchctl load ~/Library/LaunchAgents/com.sentinel.agent.plist
 ```
 
 **That's it.** macOS native notifications are enabled by default — no phone app needed.
