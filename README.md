@@ -40,21 +40,23 @@ It runs as a background daemon, monitoring both system health and AI agent behav
 
 ## Quick Start
 
-### Option A: pip install
-
-```bash
-pip install sentinel-mac
-sentinel --init-config     # Generate config (macOS alerts work immediately)
-sentinel --once            # One-shot system check
-sentinel                   # Start daemon
-```
-
-### Option B: git clone (with auto-start on login)
+### Recommended: git clone (venv + auto-start on login)
 
 ```bash
 git clone https://github.com/raunplaymore/sentinel.git
 cd sentinel
 bash install.sh            # venv + deps + launchd (auto-starts on login)
+```
+
+This creates an isolated venv at `~/.sentinel-venv`, installs all dependencies, and registers a launchd service that starts Sentinel automatically on login. The venv keeps your system Python clean — while Sentinel retains full access to system APIs (processes, network, file events).
+
+### Alternative: pip install
+
+```bash
+python3 -m venv ~/.sentinel-venv
+~/.sentinel-venv/bin/pip install sentinel-mac
+~/.sentinel-venv/bin/sentinel --init-config
+~/.sentinel-venv/bin/sentinel
 ```
 
 **That's it.** macOS native notifications are enabled by default — no phone app needed.
