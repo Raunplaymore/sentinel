@@ -317,3 +317,113 @@ class TestSecurityEventIntegration:
             with open(log_file) as f:
                 lines = f.readlines()
             assert len(lines) == 1
+
+
+# ─── Custom Rules tests ───
+
+
+class TestCustomRules:
+    """Tests for user-defined custom detection rules."""
+
+    def _make_event(self, **kwargs):
+        defaults = {
+            "timestamp": datetime.now(),
+            "source": "fs_watcher",
+            "actor_pid": 0,
+            "actor_name": "unknown",
+            "event_type": "file_modify",
+            "target": "/some/file",
+            "detail": {},
+        }
+        defaults.update(kwargs)
+        return SecurityEvent(**defaults)
+
+    def test_custom_rule_matches_fs_event(self):
+        config = {**DEFAULT_CONFIG, "security": {"custom_rules": [
+            {"name": "AWS creds", "pattern": "\\.aws/credentials", "source": "fs_watcher", "level": "critical"},
+        ]}}
+        engine = AlertEngine(config)
+        event = self._make_event(target="/Users/test/.aws/credentials")
+        alerts = engine.evaluate_security_event(event)
+        custom = [a for a in alerts if a.category.startswith("custom_")]
+        assert len(custom) == 1
+        assert custom[0].level == "critical"
+        assert "AWS creds" in custom[0].title
+
+    def test_custom_rule_matches_agent_log(self):
+        config = {**DEFAULT_CONFIG, "security": {"custom_rules": [
+            {"name": "DB dump", "pattern": "mysqldump|pg_dump", "source": "agent_log", "level": "warning"},
+        ]}}
+        engine = AlertEngine(config)
+        event = self._make_event(
+            source="agent_log", event_type="agent_command",
+            target="mysqldump --all-databases > dump.sql",
+            detail={"tool": "Bash", "command": "mysqldump --all-databases"},
+        )
+        alerts = engine.evaluate_security_event(event)
+        custom = [a for a in alerts if a.category.startswith("custom_")]
+        assert len(custom) == 1
+        assert custom[0].level == "warning"
+
+    def test_custom_rule_source_filter(self):
+        """Rule with source=agent_log should NOT match fs_watcher events."""
+        config = {**DEFAULT_CONFIG, "security": {"custom_rules": [
+            {"name": "DB dump", "pattern": "mysqldump", "source": "agent_log", "level": "critical"},
+        ]}}
+        engine = AlertEngine(config)
+        event = self._make_event(source="fs_watcher", target="/tmp/mysqldump.log")
+        alerts = engine.evaluate_security_event(event)
+        custom = [a for a in alerts if a.category.startswith("custom_")]
+        assert len(custom) == 0
+
+    def test_custom_rule_source_all_fs(self):
+        """Rule with source=all should match fs_watcher events."""
+        config = {**DEFAULT_CONFIG, "security": {"custom_rules": [
+            {"name": "Miner", "pattern": "xmrig", "source": "all", "level": "critical"},
+        ]}}
+        engine = AlertEngine(config)
+        event = self._make_event(source="fs_watcher", target="/tmp/xmrig")
+        alerts = engine.evaluate_security_event(event)
+        custom = [a for a in alerts if a.category.startswith("custom_")]
+        assert len(custom) >= 1
+
+    def test_custom_rule_source_all_net(self):
+        """Rule with source=all should match net_tracker events."""
+        config = {**DEFAULT_CONFIG, "security": {"custom_rules": [
+            {"name": "Miner", "pattern": "xmrig", "source": "all", "level": "critical"},
+        ]}}
+        engine = AlertEngine(config)
+        event = self._make_event(
+            source="net_tracker", target="xmrig-pool.com:3333",
+            detail={"hostname": "xmrig-pool.com", "remote_port": 3333, "allowed": True, "nonstandard_port": False},
+        )
+        alerts = engine.evaluate_security_event(event)
+        custom = [a for a in alerts if a.category.startswith("custom_")]
+        assert len(custom) >= 1
+
+    def test_custom_rule_no_match(self):
+        config = {**DEFAULT_CONFIG, "security": {"custom_rules": [
+            {"name": "AWS creds", "pattern": "\\.aws/credentials", "source": "fs_watcher", "level": "critical"},
+        ]}}
+        engine = AlertEngine(config)
+        event = self._make_event(target="/Users/test/hello.txt")
+        alerts = engine.evaluate_security_event(event)
+        custom = [a for a in alerts if a.category.startswith("custom_")]
+        assert len(custom) == 0
+
+    def test_invalid_regex_skipped(self):
+        """Invalid regex pattern should be skipped without crashing."""
+        config = {**DEFAULT_CONFIG, "security": {"custom_rules": [
+            {"name": "Bad regex", "pattern": "[invalid", "source": "all", "level": "warning"},
+            {"name": "Good rule", "pattern": "secret", "source": "all", "level": "warning"},
+        ]}}
+        engine = AlertEngine(config)
+        assert len(engine._custom_rules) == 1  # Only the valid one
+
+    def test_no_custom_rules(self):
+        """Engine should work fine with no custom rules."""
+        engine = AlertEngine(DEFAULT_CONFIG)
+        assert len(engine._custom_rules) == 0
+        event = self._make_event()
+        alerts = engine.evaluate_security_event(event)
+        # Should not crash

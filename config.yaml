@@ -95,3 +95,25 @@ security:
         log_dir: "~/.claude/projects"    # Claude Code JSONL session logs
       # - type: "cursor"
       #   log_dir: "~/Library/Application Support/Cursor/User/workspaceStorage"
+
+  # ── Custom Rules (Advanced) ──
+  # Define your own regex-based detection rules.
+  # source: fs_watcher, agent_log, net_tracker, or "all"
+  # level: critical, warning, or info
+  # custom_rules:
+  #   - name: "AWS credentials access"
+  #     pattern: "\\.aws/credentials"
+  #     source: fs_watcher
+  #     level: critical
+  #   - name: "Docker socket mount"
+  #     pattern: "docker.*-v.*/var/run/docker\\.sock"
+  #     source: agent_log
+  #     level: critical
+  #   - name: "Database dump"
+  #     pattern: "mysqldump|pg_dump"
+  #     source: agent_log
+  #     level: warning
+  #   - name: "Crypto miner"
+  #     pattern: "xmrig|cryptonight|stratum\\+tcp"
+  #     source: all
+  #     level: critical

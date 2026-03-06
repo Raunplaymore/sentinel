@@ -1,10 +1,14 @@
 """Sentinel — Alert Engine."""
 
+import re
+import logging
 from datetime import datetime
 from collections import deque
 from typing import Optional
 
 from sentinel_mac.models import SystemMetrics, Alert, SecurityEvent
+
+logger = logging.getLogger(__name__)
 
 
 class AlertEngine:
@@ -18,6 +22,7 @@ class AlertEngine:
         self._history: deque = deque(maxlen=30)
         self._session_start: Optional[datetime] = None
         self._idle_start: Optional[datetime] = None
+        self._custom_rules = self._compile_custom_rules(config)
 
     def evaluate(self, m: SystemMetrics) -> list[Alert]:
         self._history.append(m)
@@ -206,10 +211,18 @@ class AlertEngine:
     def evaluate_security_event(self, event: SecurityEvent) -> list[Alert]:
         """Convert a SecurityEvent into alerts based on risk rules."""
         if event.source == "net_tracker":
-            return self._evaluate_net_event(event)
-        if event.source == "agent_log":
-            return self._evaluate_agent_log_event(event)
-        return self._evaluate_fs_event(event)
+            alerts = self._evaluate_net_event(event)
+        elif event.source == "agent_log":
+            alerts = self._evaluate_agent_log_event(event)
+        else:
+            alerts = self._evaluate_fs_event(event)
+
+        # Apply custom rules on top of built-in rules
+        if self._custom_rules:
+            custom_alerts = self._evaluate_custom_rules(event)
+            alerts.extend(self._apply_cooldowns(custom_alerts, now=event.timestamp))
+
+        return alerts
 
     def _evaluate_fs_event(self, event: SecurityEvent) -> list[Alert]:
         """Evaluate file system security events."""
@@ -378,6 +391,62 @@ class AlertEngine:
             ))
 
         return self._apply_cooldowns(alerts, now=event.timestamp)
+
+    @staticmethod
+    def _compile_custom_rules(config: dict) -> list:
+        """Compile user-defined custom rules from config."""
+        rules = []
+        raw = config.get("security", {}).get("custom_rules", [])
+        for r in raw:
+            name = r.get("name", "Unnamed rule")
+            pattern = r.get("pattern", "")
+            source = r.get("source", "all")
+            level = r.get("level", "warning")
+            if level not in ("critical", "warning", "info"):
+                level = "warning"
+            if not pattern:
+                continue
+            try:
+                compiled = re.compile(pattern, re.IGNORECASE)
+                rules.append({
+                    "name": name,
+                    "pattern": compiled,
+                    "source": source,
+                    "level": level,
+                })
+            except re.error as e:
+                logger.warning("Invalid custom rule regex '{}': {}".format(name, e))
+        if rules:
+            logger.info("Loaded {} custom rule(s)".format(len(rules)))
+        return rules
+
+    def _evaluate_custom_rules(self, event: SecurityEvent) -> list[Alert]:
+        """Match event against user-defined custom rules."""
+        alerts = []
+        # Build text to match against: target + detail values
+        match_text = event.target or ""
+        for v in event.detail.values():
+            if isinstance(v, str):
+                match_text += " " + v
+
+        for rule in self._custom_rules:
+            # Filter by source if specified
+            if rule["source"] != "all" and rule["source"] != event.source:
+                continue
+            if rule["pattern"].search(match_text):
+                level = rule["level"]
+                risk = {"critical": 0.9, "warning": 0.7, "info": 0.3}.get(level, 0.7)
+                event.risk_score = max(event.risk_score, risk)
+                emoji = {"critical": "\U0001f534", "warning": "\U0001f7e0", "info": "\U0001f7e1"}.get(level, "\U0001f7e0")
+                alerts.append(Alert(
+                    level=level,
+                    category="custom_{}".format(rule["name"].lower().replace(" ", "_")),
+                    title="\U0001f6a8 Custom Rule: {}".format(rule["name"]),
+                    message="Matched: {}\nTarget: {}".format(rule["pattern"].pattern, event.target or "N/A"),
+                    emoji=emoji,
+                    priority=5 if level == "critical" else 4 if level == "warning" else 2,
+                ))
+        return alerts
 
     def _apply_cooldowns(self, alerts: list[Alert], now: Optional[datetime] = None) -> list[Alert]:
         """Prevent alert spam by enforcing cooldown per category."""

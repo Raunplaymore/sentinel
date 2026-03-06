@@ -11,7 +11,7 @@
     <a href="https://pypi.org/project/sentinel-mac/"><img src="https://img.shields.io/pypi/v/sentinel-mac" alt="PyPI"></a>
     <img src="https://img.shields.io/badge/platform-macOS-blue" alt="macOS">
     <img src="https://img.shields.io/badge/python-3.8+-green" alt="Python 3.8+">
-    <img src="https://img.shields.io/badge/tests-180%20passed-brightgreen" alt="Tests">
+    <img src="https://img.shields.io/badge/tests-188%20passed-brightgreen" alt="Tests">
     <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT License">
     <br/>
     <a href="https://buymeacoffee.com/pmpt_cafe"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-orange?logo=buy-me-a-coffee&logoColor=white" alt="Buy Me a Coffee"></a>
@@ -185,6 +185,36 @@ Scans MCP server responses for prompt injection attempts in real time.
 | Urgency manipulation | "IMPORTANT: ignore..." | Social engineering via urgency |
 | Token boundary | `<&#124;im_start&#124;>` markers | Exploiting model token boundaries |
 | Fake system prompt | "system prompt: ..." | Impersonating system messages |
+
+#### Custom Rules (Advanced)
+
+Define your own regex-based detection rules in `config.yaml`. Rules are matched against event targets and details from any collector.
+
+```yaml
+security:
+  custom_rules:
+    - name: "AWS credentials access"
+      pattern: "\\.aws/credentials"
+      source: fs_watcher          # fs_watcher, agent_log, net_tracker, or "all"
+      level: critical             # critical, warning, or info
+
+    - name: "Docker socket mount"
+      pattern: "docker.*-v.*/var/run/docker\\.sock"
+      source: agent_log
+      level: critical
+
+    - name: "Database dump"
+      pattern: "mysqldump|pg_dump"
+      source: agent_log
+      level: warning
+
+    - name: "Crypto miner"
+      pattern: "xmrig|cryptonight|stratum\\+tcp"
+      source: all
+      level: critical
+```
+
+Invalid regex patterns are skipped with a warning. Custom rule alerts follow the same cooldown and notification logic as built-in rules.
 
 ## Alert Levels
 
