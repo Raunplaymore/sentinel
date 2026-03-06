@@ -43,6 +43,7 @@ fi
 
 source "$VENV_DIR/bin/activate"
 pip install --quiet --upgrade pip
+pip install --quiet --force-reinstall --no-deps "$SCRIPT_DIR"
 pip install --quiet "$SCRIPT_DIR"
 echo -e "  ✅ Dependencies installed"
 
