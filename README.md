@@ -494,7 +494,7 @@ Full removal: `rm -rf sentinel/`
 
 Sentinel was built entirely through vibe-coding with Claude Code. Every design decision, implementation detail, and debugging session was recorded using [pmpt-cli](https://pmptwiki.com) — an AI prompt journaling tool.
 
-You can explore the full development history on the [Sentinel project page at pmptwiki.com](https://pmptwiki.com), including the prompts, decisions, and iterations that shaped this project from v0.1.0 to where it is today.
+Explore the full development history on the [Sentinel project page](https://pmptwiki.com/p/sentinel/), including the prompts, decisions, and iterations that shaped this project from v0.1.0 to where it is today.
 
 ## Support
 
