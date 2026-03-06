@@ -18,36 +18,36 @@ NC='\033[0m'
 
 echo ""
 echo -e "${CYAN}╔══════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║    🛡️  Sentinel — AI Session Guardian  ║${NC}"
+echo -e "${CYAN}║  Sentinel — A seatbelt for your AI   ║${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════╝${NC}"
 echo ""
 
 # ── Step 1: Check Python ──
-echo -e "${YELLOW}[1/5]${NC} Python 확인..."
+echo -e "${YELLOW}[1/5]${NC} Checking Python..."
 if command -v python3 &>/dev/null; then
     PY=$(python3 --version)
     echo -e "  ✅ $PY"
 else
-    echo -e "  ${RED}❌ Python 3 필요. brew install python3${NC}"
+    echo -e "  ${RED}❌ Python 3 required. Run: brew install python3${NC}"
     exit 1
 fi
 
 # ── Step 2: Create venv & install deps ──
-echo -e "${YELLOW}[2/5]${NC} 가상환경 설정..."
+echo -e "${YELLOW}[2/5]${NC} Setting up virtual environment..."
 if [ ! -d "$VENV_DIR" ]; then
     python3 -m venv "$VENV_DIR"
-    echo -e "  ✅ venv 생성됨"
+    echo -e "  ✅ venv created"
 else
-    echo -e "  ✅ 기존 venv 사용"
+    echo -e "  ✅ Using existing venv"
 fi
 
 source "$VENV_DIR/bin/activate"
 pip install --quiet --upgrade pip
 pip install --quiet "$SCRIPT_DIR"
-echo -e "  ✅ 패키지 설치 완료"
+echo -e "  ✅ Dependencies installed"
 
 # ── Step 3: Generate unique topic ──
-echo -e "${YELLOW}[3/5]${NC} ntfy.sh 토픽 설정..."
+echo -e "${YELLOW}[3/5]${NC} Configuring ntfy.sh topic..."
 EXISTING_TOPIC=$(grep "ntfy_topic:" "$SCRIPT_DIR/config.yaml" | awk '{print $2}' | tr -d '"')
 
 if [ "$EXISTING_TOPIC" = "sentinel-CHANGE-ME" ] || [ -z "$EXISTING_TOPIC" ]; then
@@ -55,14 +55,14 @@ if [ "$EXISTING_TOPIC" = "sentinel-CHANGE-ME" ] || [ -z "$EXISTING_TOPIC" ]; the
     TOPIC="sentinel-${RANDOM_ID}"
     sed -i.bak "s/ntfy_topic:.*/ntfy_topic: \"${TOPIC}\"/" "$SCRIPT_DIR/config.yaml"
     rm -f "$SCRIPT_DIR/config.yaml.bak"
-    echo -e "  ✅ 토픽 생성: ${GREEN}${TOPIC}${NC}"
+    echo -e "  ✅ Topic created: ${GREEN}${TOPIC}${NC}"
 else
     TOPIC="$EXISTING_TOPIC"
-    echo -e "  ✅ 기존 토픽 사용: ${GREEN}${TOPIC}${NC}"
+    echo -e "  ✅ Using existing topic: ${GREEN}${TOPIC}${NC}"
 fi
 
 # ── Step 4: Setup launchd ──
-echo -e "${YELLOW}[4/5]${NC} 자동 시작 설정..."
+echo -e "${YELLOW}[4/5]${NC} Registering auto-start service..."
 mkdir -p "$HOME/Library/LaunchAgents"
 
 cat > "$PLIST_PATH" << EOF
@@ -94,10 +94,10 @@ EOF
 
 # Unload if already running
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
-echo -e "  ✅ LaunchAgent 설정됨"
+echo -e "  ✅ LaunchAgent registered"
 
 # ── Step 5: Test & Start ──
-echo -e "${YELLOW}[5/5]${NC} 테스트 & 시작..."
+echo -e "${YELLOW}[5/5]${NC} Testing & starting..."
 mkdir -p "$SCRIPT_DIR/logs"
 
 # Quick test
@@ -108,30 +108,30 @@ mkdir -p "$SCRIPT_DIR/logs"
 
 # Start service
 launchctl load "$PLIST_PATH"
-echo -e "  ✅ Sentinel 서비스 시작됨"
+echo -e "  ✅ Sentinel service started"
 
 # ── Done! ──
 echo ""
 echo -e "${GREEN}══════════════════════════════════════${NC}"
-echo -e "${GREEN}  ✅ 설치 완료!${NC}"
+echo -e "${GREEN}  ✅ Installation complete!${NC}"
 echo -e "${GREEN}══════════════════════════════════════${NC}"
 echo ""
-echo -e "  📱 ${CYAN}핸드폰 설정 (1분 소요):${NC}"
+echo -e "  📱 ${CYAN}Phone setup (1 minute):${NC}"
 echo ""
-echo -e "  1. ntfy 앱 설치"
+echo -e "  1. Install the ntfy app"
 echo -e "     iOS:     https://apps.apple.com/app/ntfy/id1625396347"
 echo -e "     Android: https://play.google.com/store/apps/details?id=io.heckel.ntfy"
 echo ""
-echo -e "  2. 앱에서 구독 추가 → 토픽 입력:"
+echo -e "  2. Subscribe to your topic:"
 echo -e "     ${GREEN}${TOPIC}${NC}"
 echo ""
-echo -e "  끝! 이제 알림이 자동으로 옵니다 🎉"
+echo -e "  Done! Alerts will arrive automatically."
 echo ""
-echo -e "  ${YELLOW}유용한 명령어:${NC}"
-echo -e "  상태 확인:   $VENV_DIR/bin/sentinel --config $SCRIPT_DIR/config.yaml --once"
-echo -e "  알림 테스트:  $VENV_DIR/bin/sentinel --config $SCRIPT_DIR/config.yaml --test-notify"
-echo -e "  로그 보기:   tail -f $SCRIPT_DIR/logs/sentinel.log"
-echo -e "  서비스 중지:  launchctl unload $PLIST_PATH"
-echo -e "  서비스 시작:  launchctl load $PLIST_PATH"
-echo -e "  완전 삭제:   bash $SCRIPT_DIR/uninstall.sh"
+echo -e "  ${YELLOW}Useful commands:${NC}"
+echo -e "  Status check:    $VENV_DIR/bin/sentinel --config $SCRIPT_DIR/config.yaml --once"
+echo -e "  Test alert:      $VENV_DIR/bin/sentinel --config $SCRIPT_DIR/config.yaml --test-notify"
+echo -e "  View logs:       tail -f $SCRIPT_DIR/logs/sentinel.log"
+echo -e "  Stop service:    launchctl unload $PLIST_PATH"
+echo -e "  Start service:   launchctl load $PLIST_PATH"
+echo -e "  Uninstall:       bash $SCRIPT_DIR/uninstall.sh"
 echo ""
