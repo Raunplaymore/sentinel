@@ -490,6 +490,12 @@ Full removal: `rm -rf sentinel/`
 - [ ] Web dashboard (local, real-time charts)
 - [ ] API cost tracking (proxy-based token counting)
 
+## Built with AI
+
+Sentinel was built entirely through vibe-coding with Claude Code. Every design decision, implementation detail, and debugging session was recorded using [pmpt-cli](https://pmptwiki.com) — an AI prompt journaling tool.
+
+You can explore the full development history on the [Sentinel project page at pmptwiki.com](https://pmptwiki.com), including the prompts, decisions, and iterations that shaped this project from v0.1.0 to where it is today.
+
 ## Support
 
 If Sentinel saved your session (or your SSH keys), consider buying me a coffee!
