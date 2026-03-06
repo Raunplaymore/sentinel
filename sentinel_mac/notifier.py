@@ -256,15 +256,16 @@ class NotificationManager:
 
     def send_status(self, m: SystemMetrics):
         """Send periodic status report. Status is always sent (operational heartbeat)."""
+        cpu_temp = " | {}°C".format(m.cpu_temp) if m.cpu_temp else ""
         lines = [
-            f"CPU: {m.cpu_percent}%{f' | {m.cpu_temp}\u00b0C' if m.cpu_temp else ''}",
+            f"CPU: {m.cpu_percent}%{cpu_temp}",
             f"MEM: {m.memory_percent}% ({m.memory_used_gb}GB)",
             f"DISK: {m.disk_percent}% ({m.disk_free_gb}GB free)",
         ]
         if m.battery_percent is not None:
             plug = "\U0001f50c" if m.battery_plugged else "\U0001f50b"
-            lines.append(f"BAT: {plug} {m.battery_percent}%"
-                        f"{f' ({m.battery_minutes_left} min)' if m.battery_minutes_left else ''}")
+            bat_remaining = " ({} min)".format(m.battery_minutes_left) if m.battery_minutes_left else ""
+            lines.append(f"BAT: {plug} {m.battery_percent}%{bat_remaining}")
         if m.fan_speed_rpm:
             lines.append(f"FAN: {m.fan_speed_rpm} RPM")
         security = []
