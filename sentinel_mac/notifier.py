@@ -121,7 +121,7 @@ class NtfyNotifier:
     def _do_send(self, alert: Alert) -> bool:
         url = f"{self.server}/{self.topic}"
         headers = {
-            "Title": alert.title.encode("ascii", errors="ignore").decode("ascii"),
+            "Title": alert.title.encode("ascii", errors="ignore").decode("ascii").strip(),
             "Priority": self.PRIORITY_MAP.get(alert.priority, "default"),
             "Tags": alert.category,
         }
