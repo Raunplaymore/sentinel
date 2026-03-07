@@ -7,6 +7,7 @@ Monitors system resources and sends smart alerts via ntfy.sh
 import logging
 import queue
 import signal
+import subprocess
 import sys
 import os
 import fcntl
@@ -413,11 +414,65 @@ def generate_report(days: int = 1) -> None:
 # CLI
 # ─────────────────────────────────────────────
 
+PLIST_NAME = "com.sentinel.agent"
+PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{PLIST_NAME}.plist"
+
+
+def _service_control(command: str):
+    """Control the Sentinel launchd service."""
+    if command == "status":
+        try:
+            result = subprocess.run(
+                ["launchctl", "list", PLIST_NAME],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                # Extract PID from output
+                for line in result.stdout.strip().splitlines():
+                    if "PID" in line or line.strip().startswith('"PID"'):
+                        continue
+                    parts = line.strip().split("\t")
+                    if len(parts) >= 1 and parts[0].isdigit():
+                        print(f"Sentinel is running (PID {parts[0]})")
+                        return
+                print("Sentinel is running")
+            else:
+                print("Sentinel is not running")
+        except Exception:
+            print("Sentinel is not running")
+        return
+
+    if not PLIST_PATH.exists():
+        print(f"LaunchAgent not found: {PLIST_PATH}")
+        print("Run install.sh first, or start manually: sentinel --config <path>")
+        return
+
+    if command == "stop":
+        subprocess.run(["launchctl", "unload", str(PLIST_PATH)],
+                        capture_output=True)
+        print("Sentinel stopped")
+
+    elif command == "start":
+        subprocess.run(["launchctl", "load", str(PLIST_PATH)],
+                        capture_output=True)
+        print("Sentinel started")
+
+    elif command == "restart":
+        subprocess.run(["launchctl", "unload", str(PLIST_PATH)],
+                        capture_output=True)
+        subprocess.run(["launchctl", "load", str(PLIST_PATH)],
+                        capture_output=True)
+        print("Sentinel restarted")
+
+
 def main():
     import argparse
     from sentinel_mac import __version__
 
     parser = argparse.ArgumentParser(description="Sentinel — AI Session Guardian")
+    parser.add_argument("command", nargs="?", default=None,
+                        choices=["start", "stop", "restart", "status"],
+                        help="Service control: start, stop, restart, status")
     parser.add_argument("--config", "-c", default=None, help="Config file path")
     parser.add_argument("--once", action="store_true", help="Run once and print metrics")
     parser.add_argument("--test-notify", action="store_true", help="Send test notification")
@@ -427,6 +482,10 @@ def main():
     parser.add_argument("--init-config", action="store_true",
                         help="Generate config.yaml in ~/.config/sentinel/")
     args = parser.parse_args()
+
+    if args.command:
+        _service_control(args.command)
+        return
 
     if args.report is not None:
         generate_report(args.report)

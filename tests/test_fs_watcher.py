@@ -143,8 +143,9 @@ class TestFSWatcherEventHandling:
 
     def test_ai_process_emits_event(self):
         watcher, q = self._make_watcher()
+        sensitive_path = os.path.expanduser("~/.ssh/config")
         with patch.object(watcher, "_identify_actor", return_value=(1234, "ollama")):
-            watcher._handle_fs_event("/project/main.py", "file_modify")
+            watcher._handle_fs_event(sensitive_path, "file_modify")
         assert not q.empty()
         event = q.get_nowait()
         assert event.detail.get("ai_process") is True
