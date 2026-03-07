@@ -442,6 +442,19 @@ def _service_control(command: str):
             print("Sentinel is not running")
         return
 
+    if command == "logs":
+        data_dir = resolve_data_dir()
+        log_file = data_dir / "sentinel.log"
+        if not log_file.exists():
+            print(f"No log file found: {log_file}")
+            return
+        print(f"Tailing {log_file} (Ctrl+C to stop)\n")
+        try:
+            subprocess.run(["tail", "-f", "-n", "50", str(log_file)])
+        except KeyboardInterrupt:
+            print("\nStopped.")
+        return
+
     if not PLIST_PATH.exists():
         print(f"LaunchAgent not found: {PLIST_PATH}")
         print("Run install.sh first, or start manually: sentinel --config <path>")
@@ -476,12 +489,13 @@ def main():
                "  start       Start background service\n"
                "  stop        Stop background service\n"
                "  restart     Restart background service\n"
-               "  status      Check if service is running",
+               "  status      Check if service is running\n"
+               "  logs        Tail live logs (Ctrl+C to stop)",
     )
     parser.add_argument("command", nargs="?", default=None,
-                        choices=["start", "stop", "restart", "status"],
+                        choices=["start", "stop", "restart", "status", "logs"],
                         metavar="command",
-                        help="start | stop | restart | status")
+                        help="start | stop | restart | status | logs")
     parser.add_argument("--config", "-c", default=None, help="Config file path")
     parser.add_argument("--once", action="store_true", help="Run once and print metrics")
     parser.add_argument("--test-notify", action="store_true", help="Send test notification")
