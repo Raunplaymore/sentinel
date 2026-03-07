@@ -586,6 +586,31 @@ thresholds:
         print(f"\u2705 Test notification sent to: {', '.join(notifier.channel_names)}")
         return
 
+    # If no config found and no --config specified, show quickstart guide
+    resolved = resolve_config_path(args.config)
+    if resolved is None and args.config is None:
+        from sentinel_mac import __version__ as ver
+        print("")
+        print("=" * 50)
+        print("  Sentinel — AI Agent Security Guardian")
+        print(f"  v{ver}")
+        print("=" * 50)
+        print("")
+        print("  No config found. Quick start:")
+        print("")
+        print("  sentinel --init-config        Create config file")
+        print("  sentinel --once               System snapshot")
+        print("  sentinel --test-notify        Test notifications")
+        print("  sentinel --help               All options")
+        print("")
+        print("  For auto-start background service:")
+        print("    git clone https://github.com/raunplaymore/sentinel.git")
+        print("    cd sentinel && bash install.sh")
+        print("")
+        print("=" * 50)
+        print("")
+        return
+
     sentinel = Sentinel(config_path=args.config)
     sentinel.run()
 
