@@ -452,6 +452,8 @@ notifications:
   ntfy_topic: ""               # ntfy.sh topic (set to enable)
   ntfy_server: "https://ntfy.sh"
   slack_webhook: ""            # Slack webhook URL (set to enable)
+  telegram_bot_token: ""       # Telegram Bot token (from @BotFather)
+  telegram_chat_id: ""         # Telegram Chat ID
 
 thresholds:
   battery_warning: 20
@@ -467,7 +469,7 @@ thresholds:
             config_file.write_text(config_content)
             print(f"Config created: {config_file}")
             print(f"macOS native notifications enabled by default.")
-            print(f"Edit {config_file} to add ntfy.sh or Slack.")
+            print(f"Edit {config_file} to add ntfy.sh, Slack, or Telegram.")
         return
 
     if args.once:
