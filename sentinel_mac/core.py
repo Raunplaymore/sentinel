@@ -469,10 +469,19 @@ def main():
     import argparse
     from sentinel_mac import __version__
 
-    parser = argparse.ArgumentParser(description="Sentinel — AI Session Guardian")
+    parser = argparse.ArgumentParser(
+        description="Sentinel — AI Agent Security Guardian for macOS",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="service commands:\n"
+               "  start       Start background service\n"
+               "  stop        Stop background service\n"
+               "  restart     Restart background service\n"
+               "  status      Check if service is running",
+    )
     parser.add_argument("command", nargs="?", default=None,
                         choices=["start", "stop", "restart", "status"],
-                        help="Service control: start, stop, restart, status")
+                        metavar="command",
+                        help="start | stop | restart | status")
     parser.add_argument("--config", "-c", default=None, help="Config file path")
     parser.add_argument("--once", action="store_true", help="Run once and print metrics")
     parser.add_argument("--test-notify", action="store_true", help="Send test notification")
