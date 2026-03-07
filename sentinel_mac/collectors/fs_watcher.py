@@ -164,15 +164,18 @@ class FSWatcher:
         if self._should_ignore(path):
             return
 
-        # Check bulk changes
-        self._track_bulk(path, event_type)
-
-        # Try to identify which process touched this file
-        actor_pid, actor_name = self._identify_actor(path)
-
-        # Determine risk level
+        # Determine risk level early — skip lsof for non-interesting events
         is_sensitive = self._is_sensitive_path(path)
         is_executable = self._is_executable(path, event_type)
+
+        # Only call lsof (expensive) for sensitive or executable files
+        if is_sensitive or is_executable:
+            actor_pid, actor_name = self._identify_actor(path)
+        else:
+            actor_pid, actor_name = 0, "unknown"
+
+        # Check bulk changes
+        self._track_bulk(path, event_type)
 
         # Only emit events that are interesting:
         # 1. Any access to sensitive paths

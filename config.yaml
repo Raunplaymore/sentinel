@@ -15,7 +15,7 @@ cooldown_minutes: 10
 # If a value is set, the channel is active. No separate on/off switches.
 notifications:
   macos: true                  # macOS native notification (default, no setup needed)
-  ntfy_topic: ""               # ntfy.sh topic (set to enable)
+  ntfy_topic: "sentinel-1c53026f"
   ntfy_server: "https://ntfy.sh"
   slack_webhook: ""            # Slack webhook URL (set to enable)
   telegram_bot_token: ""       # Telegram Bot token (set to enable)
@@ -51,7 +51,16 @@ security:
   fs_watcher:
     enabled: true
     watch_paths:
-      - "~"                          # Watch entire home directory
+      - "~/.ssh"                     # SSH keys
+      - "~/.env"                     # Environment variables
+      - "~/.config"                  # Config files
+      - "~/.zshrc"                   # Shell config (watched as parent dir)
+      - "~/.bash_profile"
+      - "~/.gitconfig"              # Git config
+      - "~/.aws"                     # AWS credentials
+      - "~/Desktop"                  # Common working directories
+      - "~/Documents"
+      - "~/Downloads"
     sensitive_paths:
       - "~/.ssh"                     # SSH keys
       - "~/.env"                     # Environment variables
@@ -59,6 +68,7 @@ security:
       - "~/.zshrc"                   # Shell config
       - "~/.bash_profile"
       - "~/.gitconfig"              # Git config
+      - "~/.aws"                     # AWS credentials
     ignore_patterns:
       - "*.pyc"
       - "__pycache__"
