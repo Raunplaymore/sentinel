@@ -235,7 +235,7 @@ notifications:
 
 ## 안정성
 
-- **로그 로테이션** — 일별 JSONL 파일, 30일 후 자동 삭제
+- **로그 로테이션** — 일별 JSONL 파일, 90일 후 자동 삭제
 - **중복 실행 방지** — 글로벌 파일 락 (`~/.local/share/sentinel/sentinel.lock`) + launchd 사전 체크로, 어디서 실행하든 중복 인스턴스 차단
 - **알림 재시도** — ntfy.sh 네트워크 실패 시 최대 3회 재시도
 - **설정 폴백** — 설정 파일 오류 시 안전한 기본값으로 자동 전환
@@ -321,7 +321,7 @@ bash uninstall.sh
 
 ## AI와 함께 만들었습니다
 
-Sentinel은 Claude Code와의 바이브 코딩으로 만들어졌습니다. 모든 설계 결정, 구현, 디버깅 과정이 [pmpt-cli](https://pmptwiki.com)로 기록되었습니다.
+Sentinel은 바이브 코딩으로 만들어졌습니다. 모든 설계 결정, 구현, 디버깅 과정이 [pmpt-cli](https://pmptwiki.com)로 기록되었습니다.
 
 [Sentinel 프로젝트 페이지](https://pmptwiki.com/p/sentinel/)에서 v0.1.0부터 현재까지의 전체 개발 히스토리를 확인할 수 있습니다.
 

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class EventLogger:
     """Append-only JSONL event logger with daily rotation."""
 
-    DEFAULT_RETENTION_DAYS = 30
+    DEFAULT_RETENTION_DAYS = 90
 
     def __init__(self, data_dir, retention_days=None):
         self._events_dir = Path(data_dir) / "events"

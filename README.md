@@ -456,11 +456,11 @@ Each line is a JSON object:
 {"ts":"2026-03-07T14:34:00","source":"fs_watcher","actor_pid":9012,"actor_name":"node","event_type":"bulk_change","target":"1960 files in 30s","detail":{"count":1960,"project":"my-app","suspect_process":"node","suspect_pid":9012,"top_directories":["/Users/dev/my-app/.next"]},"risk_score":0}
 ```
 
-Logs are automatically cleaned up after **30 days** (configurable). These logs are the foundation for the upcoming team dashboard (Phase 2).
+Logs are automatically cleaned up after **90 days** (configurable). These logs are the foundation for the upcoming team dashboard (Phase 2).
 
 ## Reliability
 
-- **Log Rotation** — Daily JSONL files, auto-deleted after 30 days
+- **Log Rotation** — Daily JSONL files, auto-deleted after 90 days
 - **Single Instance Lock** — Global file lock (`~/.local/share/sentinel/sentinel.lock`) + launchd check prevents duplicate daemons regardless of working directory
 - **Alert Retry** — Up to 3 retries on network failure (ntfy.sh)
 - **Config Fallback** — Auto-switches to defaults on config errors
@@ -504,7 +504,7 @@ Full removal: `rm -rf sentinel/`
 
 ## Built with AI
 
-Sentinel was built entirely through vibe-coding with Claude Code. Every design decision, implementation detail, and debugging session was recorded using [pmpt-cli](https://pmptwiki.com) — an AI prompt journaling tool.
+Sentinel was built entirely through vibe-coding. Every design decision, implementation detail, and debugging session was recorded using [pmpt-cli](https://pmptwiki.com) — an AI prompt journaling tool.
 
 Explore the full development history on the [Sentinel project page](https://pmptwiki.com/p/sentinel/), including the prompts, decisions, and iterations that shaped this project from v0.1.0 to where it is today.
 
