@@ -236,11 +236,23 @@ class AlertEngine:
         # Bulk change alert
         if event.event_type == "bulk_change":
             count = event.detail.get("count", 0)
+            project = event.detail.get("project", "")
+            top_dirs = event.detail.get("top_directories", [])
+            suspect = event.detail.get("suspect_process", "")
+            suspect_pid = event.detail.get("suspect_pid", 0)
+
+            msg_lines = [f"{count} file operations in a short window."]
+            if project:
+                msg_lines.append(f"Project: {project}")
+            if suspect:
+                msg_lines.append(f"Suspect process: {suspect} (PID {suspect_pid})")
+            if top_dirs:
+                msg_lines.append(f"Top dirs: {', '.join(top_dirs[:3])}")
+
             alerts.append(Alert(
                 level="warning", category="fs_bulk_change",
                 title="\U0001f4c1 Bulk File Changes Detected",
-                message=f"{count} file operations in a short window.\n"
-                       f"Possible automated mass modification.",
+                message="\n".join(msg_lines),
                 emoji="\U0001f7e0", priority=4
             ))
             return self._apply_cooldowns(alerts, now=event.timestamp)

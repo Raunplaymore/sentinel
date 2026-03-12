@@ -9,6 +9,7 @@ build/
 # Sentinel runtime
 logs/
 *.lock
+config.yaml
 
 # Build tools
 generate_preview.py

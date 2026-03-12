@@ -161,6 +161,12 @@ Thread 2 (AgentLogParser):
 - [x] pyproject.toml v0.3.0 + watchdog 의존성
 - [x] README 업데이트 — MCP, Telegram, Cursor 문서화
 - [x] Cursor 로그 파서 + Telegram 알림 채널
+- [x] Forensic context for FS events (bulk change: project/process/directory tracking)
+- [x] Sensitive file actor detection fallback (parent directory lsof)
+- [x] Telegram notification channel configured and verified
+- [x] CPU temperature monitoring via osx-cpu-temp
+- [x] Duplicate instance prevention (fixed global lock path + launchctl check)
+- [x] config.yaml added to .gitignore (token protection)
 
 ## Snapshot Log
 
@@ -258,3 +264,19 @@ Thread 2 (AgentLogParser):
 - (3) Telegram notification channel using Bot API with "value means enabled" pattern (bot_token + chat_id)
 - Also bumped version to 0.3.0, added watchdog dependency, and updated README with MCP injection docs and Telegram setup
 - 180 tests passing (+25 new)
+
+### v11 — 2026-03-06
+- v0.3.0 release: Added AI Security Layer with three new collectors — FSWatcher (macOS FSEvents file monitoring with process attribution), NetTracker (outbound connection tracking with allowlist and reverse DNS), and AgentLogParser (Claude Code + Cursor log parsing with 11 high-risk command patterns)
+- Implemented MCP injection detection scanning tool_result entries against 10 compiled regex patterns for prompt injection attempts
+- Added Telegram notification channel alongside existing macOS/ntfy/Slack
+- All security events flow through a thread-safe queue to a JSONL audit logger with daily rotation
+- README rewritten with new tagline "A seatbelt for your AI", config.yaml comments translated to English, and table rendering fixes
+- 180 tests passing
+
+### v12 — 2026-03-13
+- **Forensic context enhancement**: Bulk file change events now record project name (auto-detected via .git/package.json), suspect process (lsof on top directories), and affected directory list in JSONL events and alert messages
+- **Sensitive file actor detection improved**: Added parent directory lsof fallback when direct file lsof fails (catches build processes like node)
+- **Telegram notifications activated**: Configured bot token + chat_id, verified message delivery
+- **CPU temperature monitoring enabled**: Installed osx-cpu-temp via Homebrew, updated system collector to use shutil.which with /usr/local/bin fallback for daemon environments
+- **Duplicate instance prevention fixed**: Lock file path changed from cwd-dependent to fixed ~/.local/share/sentinel/sentinel.lock; `sentinel start` now checks launchctl list before loading plist, shows "already running" instead of silently starting a second instance
+- **config.yaml added to .gitignore** to prevent Telegram bot token from being committed

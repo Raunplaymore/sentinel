@@ -225,8 +225,15 @@ class Sentinel:
         signal.signal(signal.SIGINT, self._shutdown)
 
     def _acquire_lock(self):
-        """Prevent duplicate daemon instances using a file lock."""
-        lock_file = self._data_dir / "sentinel.lock"
+        """Prevent duplicate daemon instances using a file lock.
+
+        Always uses a fixed path (~/.local/share/sentinel/) regardless of
+        working directory, so that two instances started from different
+        locations still detect each other.
+        """
+        global_lock_dir = Path.home() / ".local" / "share" / "sentinel"
+        global_lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_file = global_lock_dir / "sentinel.lock"
         self._pid_file = open(lock_file, "w")
         try:
             fcntl.flock(self._pid_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -466,9 +473,22 @@ def _service_control(command: str):
         print("Sentinel stopped")
 
     elif command == "start":
-        subprocess.run(["launchctl", "load", str(PLIST_PATH)],
-                        capture_output=True)
-        print("Sentinel started")
+        # Check if already running via launchd
+        check = subprocess.run(
+            ["launchctl", "list", PLIST_NAME],
+            capture_output=True, text=True,
+        )
+        if check.returncode == 0:
+            print("Sentinel is already running")
+            return
+        result = subprocess.run(
+            ["launchctl", "load", str(PLIST_PATH)],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"Failed to start Sentinel: {result.stderr.strip()}")
+        else:
+            print("Sentinel started")
 
     elif command == "restart":
         subprocess.run(["launchctl", "unload", str(PLIST_PATH)],

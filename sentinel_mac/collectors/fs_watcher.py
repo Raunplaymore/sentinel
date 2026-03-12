@@ -110,7 +110,7 @@ class FSWatcher:
         # Bulk change detection
         self._bulk_threshold = sec_config.get("bulk_threshold", 50)
         self._bulk_window = sec_config.get("bulk_window_seconds", 30)
-        self._recent_events: list[float] = []
+        self._recent_events: list[tuple[float, str]] = []  # (timestamp, path)
         self._bulk_lock = threading.Lock()
         self._last_bulk_alert_time = 0.0
 
@@ -171,6 +171,9 @@ class FSWatcher:
         # Only call lsof (expensive) for sensitive or executable files
         if is_sensitive or is_executable:
             actor_pid, actor_name = self._identify_actor(path)
+            # Fallback: if lsof on exact file fails, try parent directory
+            if actor_pid == 0 and actor_name == "unknown":
+                actor_pid, actor_name = self._identify_actor_by_dir(path)
         else:
             actor_pid, actor_name = 0, "unknown"
 
@@ -303,6 +306,31 @@ class FSWatcher:
 
         return False
 
+    def _identify_actor_by_dir(self, path: str) -> tuple[int, str]:
+        """Fallback: find a process with the parent directory open."""
+        parent = str(Path(path).parent)
+        try:
+            result = subprocess.run(
+                ["lsof", "+D", parent, "-F", "pc", "-t"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                for pid_str in result.stdout.strip().splitlines()[:5]:
+                    try:
+                        pid = int(pid_str.strip())
+                        ps_result = subprocess.run(
+                            ["ps", "-p", str(pid), "-o", "comm="],
+                            capture_output=True, text=True, timeout=2,
+                        )
+                        name = ps_result.stdout.strip()
+                        if name and name not in ("lsof", "sentinel", "python3", "Python"):
+                            return pid, os.path.basename(name)
+                    except (ValueError, OSError):
+                        continue
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        return 0, "unknown"
+
     def _get_process_cmdline(self, pid: int) -> str:
         """Get command line of a process by PID."""
         try:
@@ -318,24 +346,104 @@ class FSWatcher:
         """Track recent events for bulk change detection."""
         now = time.time()
         with self._bulk_lock:
-            self._recent_events.append(now)
+            self._recent_events.append((now, path))
             # Prune old events
             cutoff = now - self._bulk_window
-            self._recent_events = [t for t in self._recent_events if t > cutoff]
+            self._recent_events = [(t, p) for t, p in self._recent_events if t > cutoff]
 
-            if (len(self._recent_events) >= self._bulk_threshold
+            count = len(self._recent_events)
+            if (count >= self._bulk_threshold
                     and now - self._last_bulk_alert_time > self._bulk_window):
                 self._last_bulk_alert_time = now
+
+                # Analyze affected paths for forensic context
+                paths = [p for _, p in self._recent_events]
+                top_dirs = self._analyze_bulk_paths(paths)
+                source_project = self._guess_project_name(paths)
+                suspect_pid, suspect_name = self._identify_bulk_actor(top_dirs)
+
+                detail = {
+                    "count": count,
+                    "top_directories": top_dirs[:5],
+                }
+                if source_project:
+                    detail["project"] = source_project
+                if suspect_name != "unknown":
+                    detail["suspect_process"] = suspect_name
+                    detail["suspect_pid"] = suspect_pid
+
                 event = SecurityEvent(
                     timestamp=datetime.now(),
                     source="fs_watcher",
-                    actor_pid=0,
-                    actor_name="unknown",
+                    actor_pid=suspect_pid,
+                    actor_name=suspect_name,
                     event_type="bulk_change",
-                    target=f"{len(self._recent_events)} files in {self._bulk_window}s",
-                    detail={"count": len(self._recent_events)},
+                    target=f"{count} files in {self._bulk_window}s",
+                    detail=detail,
                 )
                 try:
                     self._event_queue.put_nowait(event)
                 except queue.Full:
                     pass
+
+    @staticmethod
+    def _analyze_bulk_paths(paths: list[str]) -> list[str]:
+        """Find the most common parent directories from a list of paths."""
+        dir_counts: dict[str, int] = {}
+        for p in paths:
+            # Use 2-level parent for meaningful grouping
+            parts = Path(p).parts
+            if len(parts) >= 4:
+                key = str(Path(*parts[:5]))  # e.g. /Users/user/projects/myapp
+            else:
+                key = str(Path(p).parent)
+            dir_counts[key] = dir_counts.get(key, 0) + 1
+
+        return sorted(dir_counts, key=dir_counts.get, reverse=True)
+
+    @staticmethod
+    def _guess_project_name(paths: list[str]) -> str:
+        """Try to identify the project name from common path prefix."""
+        if not paths:
+            return ""
+        try:
+            common = os.path.commonpath(paths)
+            # Walk up until we find a likely project root (has .git, package.json, etc.)
+            current = Path(common)
+            for _ in range(5):
+                if any((current / marker).exists()
+                       for marker in (".git", "package.json", "pyproject.toml", "Cargo.toml", "go.mod")):
+                    return current.name
+                if current.parent == current:
+                    break
+                current = current.parent
+        except (ValueError, OSError):
+            pass
+        return ""
+
+    def _identify_bulk_actor(self, top_dirs: list[str]) -> tuple[int, str]:
+        """Try to find the process responsible for bulk changes via lsof on top directories."""
+        for d in top_dirs[:2]:
+            try:
+                result = subprocess.run(
+                    ["lsof", "+D", d, "-F", "pcn", "-t"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    # Parse first PID from lsof -t output
+                    for pid_str in result.stdout.strip().splitlines()[:5]:
+                        try:
+                            pid = int(pid_str.strip())
+                            # Get process name
+                            ps_result = subprocess.run(
+                                ["ps", "-p", str(pid), "-o", "comm="],
+                                capture_output=True, text=True, timeout=2,
+                            )
+                            name = ps_result.stdout.strip()
+                            if name and name not in ("lsof", "sentinel", "python3", "Python"):
+                                return pid, os.path.basename(name)
+                        except (ValueError, OSError):
+                            continue
+            except (subprocess.TimeoutExpired, OSError):
+                continue
+        return 0, "unknown"

@@ -1,6 +1,7 @@
 """Sentinel — System Metrics Collector (macOS-specific)."""
 
 import psutil
+import shutil
 import subprocess
 import re
 import time
@@ -90,8 +91,9 @@ class MacOSCollector:
     def _get_cpu_temp(self) -> Optional[float]:
         """Get CPU temperature via osx-cpu-temp (brew install osx-cpu-temp)."""
         try:
+            cmd = shutil.which("osx-cpu-temp") or "/usr/local/bin/osx-cpu-temp"
             out = subprocess.run(
-                ["osx-cpu-temp"], capture_output=True, text=True, timeout=3
+                [cmd], capture_output=True, text=True, timeout=3
             )
             if out.returncode == 0:
                 match = re.search(r"([\d.]+)\u00b0C", out.stdout)
