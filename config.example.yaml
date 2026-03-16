@@ -1,0 +1,137 @@
+# ───────────────────────────────────────
+# Sentinel — Configuration Template
+# ───────────────────────────────────────
+# Copy this file to config.yaml and fill in your values.
+# config.yaml is gitignored — your secrets stay local.
+#
+# Environment variables override config.yaml values:
+#   SENTINEL_NTFY_TOPIC
+#   SENTINEL_SLACK_WEBHOOK
+#   SENTINEL_TELEGRAM_TOKEN
+#   SENTINEL_TELEGRAM_CHAT_ID
+
+# Monitoring interval (seconds)
+check_interval_seconds: 30
+
+# Status report interval (minutes) — 0 to disable
+status_interval_minutes: 60
+
+# Alert cooldown (minutes) — prevents repeated alerts in the same category
+cooldown_minutes: 10
+
+# ── Notification Channels ──
+# If a value is set, the channel is active. No separate on/off switches.
+notifications:
+  macos: true                  # macOS native notification (default, no setup needed)
+  ntfy_topic: "sentinel-CHANGE-ME"
+  ntfy_server: "https://ntfy.sh"
+  slack_webhook: ""            # Slack webhook URL (set to enable)
+  telegram_bot_token: ""       # Telegram Bot token (set to enable)
+  telegram_chat_id: ""         # Telegram chat ID
+
+# ── Thresholds ──
+thresholds:
+  # Battery
+  battery_warning: 20          # % level
+  battery_critical: 10         # % level
+  battery_drain_rate: 10       # % drop over last 5 measurements
+
+  # Temperature
+  temp_warning: 85             # °C
+  temp_critical: 95            # °C
+
+  # Memory
+  memory_critical: 90          # % usage
+
+  # Disk
+  disk_critical: 90            # % usage
+
+  # Network
+  network_spike_mb: 100        # MB per check interval
+
+  # Session
+  session_hours_warning: 3     # Alert after N hours of continuous AI session
+
+# ── AI Security Layer ──
+security:
+  enabled: true
+
+  fs_watcher:
+    enabled: true
+    watch_paths:
+      - "~/.ssh"                     # SSH keys
+      - "~/.env"                     # Environment variables
+      - "~/.config"                  # Config files
+      - "~/.zshrc"                   # Shell config (watched as parent dir)
+      - "~/.bash_profile"
+      - "~/.gitconfig"              # Git config
+      - "~/.aws"                     # AWS credentials
+      - "~/Desktop"                  # Common working directories
+      - "~/Documents"
+      - "~/Downloads"
+    sensitive_paths:
+      - "~/.ssh"                     # SSH keys
+      - "~/.env"                     # Environment variables
+      - "~/.config"                  # Config files
+      - "~/.zshrc"                   # Shell config
+      - "~/.bash_profile"
+      - "~/.gitconfig"              # Git config
+      - "~/.aws"                     # AWS credentials
+    ignore_patterns:
+      - "*.pyc"
+      - "__pycache__"
+      - "node_modules"
+      - ".git/objects"
+      - ".git/index"
+      - "*.swp"
+      - "*.tmp"
+      - ".DS_Store"
+    bulk_threshold: 50               # Alert when N+ files change
+    bulk_window_seconds: 30          # Time window for bulk detection
+
+  net_tracker:
+    enabled: true
+    alert_on_unknown: true           # Alert on connections outside allowlist
+    allowlist:
+      - "api.anthropic.com"
+      - "api.openai.com"
+      - "*.github.com"
+      - "*.githubusercontent.com"
+      - "pypi.org"
+      - "files.pythonhosted.org"
+      - "registry.npmjs.org"
+      - "ntfy.sh"
+      - "*.amazonaws.com"
+      - "*.cloudfront.net"
+      - "*.google.com"
+      - "*.googleapis.com"
+
+  agent_logs:
+    enabled: true
+    parsers:
+      - type: "claude_code"
+        log_dir: "~/.claude/projects"    # Claude Code JSONL session logs
+      # - type: "cursor"
+      #   log_dir: "~/Library/Application Support/Cursor/User/workspaceStorage"
+
+  # ── Custom Rules (Advanced) ──
+  # Define your own regex-based detection rules.
+  # source: fs_watcher, agent_log, net_tracker, or "all"
+  # level: critical, warning, or info
+  # custom_rules:
+  #   - name: "AWS credentials access"
+  #     pattern: "\\.aws/credentials"
+  #     source: fs_watcher
+  #     level: critical
+  #   - name: "Docker socket mount"
+  #     pattern: "docker.*-v.*/var/run/docker\\.sock"
+  #     source: agent_log
+  #     level: critical
+  #   - name: "Database dump"
+  #     pattern: "mysqldump|pg_dump"
+  #     source: agent_log
+  #     level: warning
+  #   - name: "Crypto miner"
+  #     pattern: "xmrig|cryptonight|stratum\\+tcp"
+  #     source: all
+  #     level: critical

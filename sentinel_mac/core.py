@@ -134,6 +134,21 @@ def _validate_config(config: dict) -> dict:
     return config
 
 
+def _apply_env_overrides(config: dict) -> None:
+    """Override notification secrets with environment variables if set."""
+    notif = config.setdefault("notifications", {})
+    env_map = {
+        "SENTINEL_NTFY_TOPIC":        "ntfy_topic",
+        "SENTINEL_SLACK_WEBHOOK":     "slack_webhook",
+        "SENTINEL_TELEGRAM_TOKEN":    "telegram_bot_token",
+        "SENTINEL_TELEGRAM_CHAT_ID":  "telegram_chat_id",
+    }
+    for env_key, config_key in env_map.items():
+        val = os.environ.get(env_key)
+        if val:
+            notif[config_key] = val
+
+
 def load_config(config_path: Path = None) -> dict:
     """Load config with error handling and default fallback."""
     defaults = DEFAULT_CONFIG.copy()
@@ -150,6 +165,7 @@ def load_config(config_path: Path = None) -> dict:
             return defaults
         merged = {**defaults, **user_config}
         merged["thresholds"] = {**defaults["thresholds"], **user_config.get("thresholds", {})}
+        _apply_env_overrides(merged)
         return _validate_config(merged)
     except FileNotFoundError:
         logging.warning(f"Config not found: {config_path} — using defaults")

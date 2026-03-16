@@ -61,6 +61,13 @@ fi
 
 # ── Step 4: Generate unique topic ──
 echo -e "${YELLOW}[4/6]${NC} Configuring ntfy.sh topic..."
+
+# Create config.yaml from template if it doesn't exist
+if [ ! -f "$SCRIPT_DIR/config.yaml" ]; then
+    cp "$SCRIPT_DIR/config.example.yaml" "$SCRIPT_DIR/config.yaml"
+    echo -e "  ✅ config.yaml created from template"
+fi
+
 EXISTING_TOPIC=$(grep "ntfy_topic:" "$SCRIPT_DIR/config.yaml" | awk '{print $2}' | tr -d '"')
 
 if [ "$EXISTING_TOPIC" = "sentinel-CHANGE-ME" ] || [ -z "$EXISTING_TOPIC" ]; then
