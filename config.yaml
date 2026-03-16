@@ -6,7 +6,7 @@
 check_interval_seconds: 30
 
 # Status report interval (minutes) — 0 to disable
-status_interval_minutes: 60
+status_interval_minutes: 180
 
 # Alert cooldown (minutes) — prevents repeated alerts in the same category
 cooldown_minutes: 10
@@ -18,8 +18,8 @@ notifications:
   ntfy_topic: "sentinel-1c53026f"
   ntfy_server: "https://ntfy.sh"
   slack_webhook: ""            # Slack webhook URL (set to enable)
-  telegram_bot_token: ""       # Telegram Bot token (set to enable)
-  telegram_chat_id: ""         # Telegram Chat ID
+  telegram_bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
+  telegram_chat_id: "8616786624"
 
 # ── Thresholds ──
 thresholds:
