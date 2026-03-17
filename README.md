@@ -33,6 +33,7 @@ AI agents like Claude Code, Cursor, and GPT can now write code, run shell comman
 | Agent runs `curl … &#124; sh`            | Arbitrary code execution on your machine |
 | Agent writes to `~/.ssh/authorized_keys` | Your SSH keys are compromised            |
 | Agent connects to unknown hosts          | Your data could be exfiltrated           |
+| Agent installs `requets` instead of `requests` | Typosquatted package runs on your machine |
 | Battery hits 0% during long session      | Work lost, session gone                  |
 | CPU throttles from overheating           | Agent stalls, burns power for hours      |
 
@@ -180,6 +181,31 @@ Parses Claude Code session logs in real time to catch risky tool calls before th
 - `Write` tool targeting sensitive paths (`~/.ssh/authorized_keys`, `.env`, etc.)
 - `WebFetch` tool accessing external URLs
 - MCP tool invocations (any `mcp__*` tool calls)
+
+#### Typosquatting Detection
+
+AI agents sometimes install packages that don't exist — either through hallucination or a one-character typo. Attackers exploit this by publishing packages with names one edit away from popular ones.
+
+Sentinel checks every `pip install` and `npm install` command against a curated list of the top ~300 PyPI and ~200 npm packages using [Levenshtein edit distance](https://en.wikipedia.org/wiki/Levenshtein_distance). If the package looks like a misspelling of something well-known, you get an alert before the code runs.
+
+```
+Agent runs: pip install requets
+Sentinel:   🚨 Typosquatting Suspect — 'requets' looks like 'requests' (edit distance 1)
+
+Agent runs: npm install lodashs
+Sentinel:   🚨 Typosquatting Suspect — 'lodashs' looks like 'lodash' (edit distance 1)
+
+Agent runs: pip install numpyy pandas
+Sentinel:   🚨 Typosquatting Suspect — 'numpyy' looks like 'numpy' (edit distance 1)
+            ✅ 'pandas' — clean
+```
+
+| Edit distance | Confidence | Alert level |
+| :-----------: | ---------- | ----------- |
+| 1             | High       | Critical    |
+| 2             | Medium     | Warning     |
+
+The package list is updated at each Sentinel release. It covers the packages most commonly targeted by typosquatting attacks — the long tail of obscure packages is intentionally excluded to keep false positives near zero.
 
 #### MCP Injection Detection
 
