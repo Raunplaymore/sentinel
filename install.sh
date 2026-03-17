@@ -136,9 +136,9 @@ SHELL_RC="$HOME/.zshrc"
 
 ALIAS_LINE="alias sentinel=\"${VENV_DIR}/bin/sentinel --config ${SCRIPT_DIR}/config.yaml\""
 if grep -q "alias sentinel=" "$SHELL_RC" 2>/dev/null; then
-    # Update existing alias to point to current venv
-    sed -i.bak "/alias sentinel=/c\\${ALIAS_LINE}" "$SHELL_RC"
-    rm -f "${SHELL_RC}.bak"
+    # Update existing alias — remove old line, append new one
+    grep -v "alias sentinel=" "$SHELL_RC" > "${SHELL_RC}.tmp" && mv "${SHELL_RC}.tmp" "$SHELL_RC"
+    echo "$ALIAS_LINE" >> "$SHELL_RC"
     echo -e "  ✅ Alias updated in $(basename $SHELL_RC)"
 else
     echo "" >> "$SHELL_RC"
