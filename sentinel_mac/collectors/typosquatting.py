@@ -84,16 +84,16 @@ POPULAR_NPM = {
     "readable-stream", "through2", "bl", "concat-stream",
     "tar", "archiver", "adm-zip", "yauzl", "yazl",
     "semver", "node-semver", "compare-versions",
-    "lodash-es", "ramda", "fp-ts", "io-ts", "effect",
-    "typeorm", "knex", "objection", "bookshelf",
+    "lodash-es", "fp-ts", "io-ts", "effect",
+    "objection", "bookshelf",
     "redis", "ioredis", "bull", "bullmq", "bee-queue",
     "aws-sdk", "@aws-sdk/client-s3", "firebase", "@google-cloud/storage",
     "stripe", "twilio", "sendgrid", "@sendgrid/mail",
-    "sharp", "jimp", "canvas", "fabric",
+    "jimp", "canvas", "fabric",
     "markdown-it", "marked", "showdown", "remark",
     "highlight.js", "prismjs", "shiki",
     "socket.io-client", "ws", "uws",
-    "knex", "pg", "mysql2", "sqlite3", "mongodb",
+    "pg", "mysql2", "sqlite3", "mongodb",
     "class-transformer", "class-validator", "reflect-metadata",
     "tsyringe", "inversify", "awilix",
     "date-fns", "luxon", "timezone-support",
@@ -118,10 +118,23 @@ POPULAR_NPM = {
 # ── Regex to extract package names ───────────────────────────────────────────
 # pip install foo bar==1.0 baz>=2 → ["foo", "bar", "baz"]
 _PIP_EXTRAS_RE = re.compile(r"[>=<!~\[].*")
-_PIP_FLAGS_RE = re.compile(r"^-")
+_FLAGS_RE = re.compile(r"^-")  # shared for pip and npm flag tokens
 
-# npm install foo @scope/bar → ["foo", "@scope/bar"]
-_NPM_FLAGS_RE = re.compile(r"^-")
+# ── Module-level normalized caches (built once at import time) ────────────────
+# Exact-match sets (normalized) for fast O(1) lookups
+POPULAR_PYPI_NORMALIZED: frozenset[str] = frozenset(
+    p.lower().replace("_", "-").replace(".", "-") for p in POPULAR_PYPI
+)
+POPULAR_NPM_NORMALIZED: frozenset[str] = frozenset(
+    p.lower().replace("_", "-").replace(".", "-") for p in POPULAR_NPM
+)
+# Pre-normalized (norm, original) pairs for distance comparisons
+_POPULAR_PYPI_NORM_PAIRS: list[tuple[str, str]] = [
+    (p.lower().replace("_", "-").replace(".", "-"), p) for p in POPULAR_PYPI
+]
+_POPULAR_NPM_NORM_PAIRS: list[tuple[str, str]] = [
+    (p.lower().replace("_", "-").replace(".", "-"), p) for p in POPULAR_NPM
+]
 
 
 def _normalize(name: str) -> str:
@@ -166,7 +179,7 @@ def extract_pip_packages(command: str) -> list[str]:
     packages = []
     for token in rest.split():
         # Skip flags like --upgrade, -q, etc.
-        if _PIP_FLAGS_RE.match(token):
+        if _FLAGS_RE.match(token):
             continue
         # Strip version specifiers: foo>=1.0 → foo
         name = _PIP_EXTRAS_RE.sub("", token).strip()
@@ -184,7 +197,7 @@ def extract_npm_packages(command: str) -> list[str]:
     rest = command[match.end():]
     packages = []
     for token in rest.split():
-        if _NPM_FLAGS_RE.match(token):
+        if _FLAGS_RE.match(token):
             continue
         # Strip version: foo@1.0 → foo (but keep @scope/pkg intact)
         if "@" in token and not token.startswith("@"):
@@ -202,19 +215,18 @@ def check_typosquatting(
 
     Returns a dict with match info if suspicious, None if clean.
     """
-    popular = POPULAR_PYPI if ecosystem == "pip" else POPULAR_NPM
     norm = _normalize(package)
 
     # Exact match — legit
-    if norm in {_normalize(p) for p in popular}:
+    exact_set = POPULAR_PYPI_NORMALIZED if ecosystem == "pip" else POPULAR_NPM_NORMALIZED
+    if norm in exact_set:
         return None
 
+    norm_pairs = _POPULAR_PYPI_NORM_PAIRS if ecosystem == "pip" else _POPULAR_NPM_NORM_PAIRS
     best_match = None
     best_dist = 999
 
-    for known in popular:
-        known_norm = _normalize(known)
-
+    for known_norm, known in norm_pairs:
         # Skip comparison if length difference is too large
         if abs(len(norm) - len(known_norm)) > 3:
             continue

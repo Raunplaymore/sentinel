@@ -443,21 +443,38 @@ PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{PLIST_NAME}.plist"
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 SENTINEL_HOOK_MARKER = "sentinel hook-check"
 
+# Patterns skipped in hook-check (handled separately by typosquatting detector)
+_HOOK_SKIP_REASONS: frozenset[str] = frozenset({"arbitrary package install"})
+
+
+def _load_claude_settings() -> "tuple[dict | None, str | None]":
+    """Load ~/.claude/settings.json. Returns (settings, error_message)."""
+    if not CLAUDE_SETTINGS_PATH.exists():
+        return None, "Claude Code settings not found: ~/.claude/settings.json\nIs Claude Code installed?"
+    try:
+        return json.loads(CLAUDE_SETTINGS_PATH.read_text()), None
+    except json.JSONDecodeError:
+        return None, "Error: ~/.claude/settings.json is not valid JSON"
+
+
+def _hook_has_sentinel(hook_entry: dict) -> bool:
+    """Check if a PreToolUse hook entry contains the Sentinel hook-check command."""
+    return any(
+        SENTINEL_HOOK_MARKER in h.get("command", "")
+        for h in hook_entry.get("hooks", [])
+        if isinstance(h, dict)
+    )
+
 
 def _hooks_control(subcommand: str):
     """Manage Claude Code PreToolUse hooks for Sentinel."""
     if subcommand == "status":
-        if not CLAUDE_SETTINGS_PATH.exists():
-            print("Claude Code settings not found: ~/.claude/settings.json")
-            print("Is Claude Code installed?")
+        settings, err = _load_claude_settings()
+        if settings is None:
+            print(err)
             return
-        settings = json.loads(CLAUDE_SETTINGS_PATH.read_text())
         hooks = settings.get("hooks", {}).get("PreToolUse", [])
-        installed = any(
-            SENTINEL_HOOK_MARKER in json.dumps(h)
-            for h in hooks
-        )
-        if installed:
+        if any(_hook_has_sentinel(h) for h in hooks):
             print("✅ Sentinel hook is installed in ~/.claude/settings.json")
         else:
             print("❌ Sentinel hook is NOT installed")
@@ -467,12 +484,10 @@ def _hooks_control(subcommand: str):
     if subcommand == "install":
         sentinel_bin = sys.argv[0]
 
-        # Load or create settings
         if CLAUDE_SETTINGS_PATH.exists():
-            try:
-                settings = json.loads(CLAUDE_SETTINGS_PATH.read_text())
-            except json.JSONDecodeError:
-                print("Error: ~/.claude/settings.json is not valid JSON")
+            settings, err = _load_claude_settings()
+            if settings is None:
+                print(err)
                 return
         else:
             CLAUDE_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -481,19 +496,13 @@ def _hooks_control(subcommand: str):
         hooks = settings.setdefault("hooks", {})
         pre_tool_use = hooks.setdefault("PreToolUse", [])
 
-        # Check if already installed
-        if any(SENTINEL_HOOK_MARKER in json.dumps(h) for h in pre_tool_use):
+        if any(_hook_has_sentinel(h) for h in pre_tool_use):
             print("Sentinel hook is already installed.")
             return
 
         pre_tool_use.append({
             "matcher": "Bash",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": f"{sentinel_bin} hook-check",
-                }
-            ],
+            "hooks": [{"type": "command", "command": f"{sentinel_bin} hook-check"}],
         })
 
         CLAUDE_SETTINGS_PATH.write_text(json.dumps(settings, indent=2))
@@ -503,24 +512,19 @@ def _hooks_control(subcommand: str):
         return
 
     if subcommand == "uninstall":
-        if not CLAUDE_SETTINGS_PATH.exists():
-            print("Claude Code settings not found.")
-            return
-        try:
-            settings = json.loads(CLAUDE_SETTINGS_PATH.read_text())
-        except json.JSONDecodeError:
-            print("Error: ~/.claude/settings.json is not valid JSON")
+        settings, err = _load_claude_settings()
+        if settings is None:
+            print(err)
             return
 
         pre_tool_use = settings.get("hooks", {}).get("PreToolUse", [])
-        before = len(pre_tool_use)
-        filtered = [h for h in pre_tool_use if SENTINEL_HOOK_MARKER not in json.dumps(h)]
-        settings["hooks"]["PreToolUse"] = filtered
+        filtered = [h for h in pre_tool_use if not _hook_has_sentinel(h)]
 
-        if len(filtered) == before:
+        if len(filtered) == len(pre_tool_use):
             print("Sentinel hook was not installed.")
             return
 
+        settings["hooks"]["PreToolUse"] = filtered
         CLAUDE_SETTINGS_PATH.write_text(json.dumps(settings, indent=2))
         print("✅ Sentinel hook uninstalled.")
         return
@@ -556,23 +560,23 @@ def _hook_check():
     reasons = []
 
     # High-risk pattern check — skip pip/npm install (handled by typosquatting below)
-    _SKIP_REASONS = {"arbitrary package install"}
     for pattern, reason in HIGH_RISK_PATTERNS:
-        if reason in _SKIP_REASONS:
+        if reason in _HOOK_SKIP_REASONS:
             continue
         if pattern.search(command_lower):
             reasons.append(f"high-risk command: {reason}")
             break
 
     # Typosquatting check — block only high-confidence matches
-    if "pip" in command_lower:
-        for pkg in extract_pip_packages(command):
+    pip_pkgs = extract_pip_packages(command)
+    if pip_pkgs:
+        for pkg in pip_pkgs:
             result = check_typosquatting(pkg, "pip")
             if result and result["confidence"] == "high":
                 reasons.append(
                     f"typosquatting suspect: '{pkg}' looks like '{result['similar_to']}'"
                 )
-    elif "npm" in command_lower:
+    else:
         for pkg in extract_npm_packages(command):
             result = check_typosquatting(pkg, "npm")
             if result and result["confidence"] == "high":

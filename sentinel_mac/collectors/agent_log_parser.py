@@ -321,14 +321,14 @@ class AgentLogParser:
         """Check pip/npm install commands for typosquatted package names."""
         events = []
 
-        if "pip" in command:
-            packages = extract_pip_packages(command)
+        packages = extract_pip_packages(command)
+        if packages:
             ecosystem = "pip"
-        elif "npm" in command:
-            packages = extract_npm_packages(command)
-            ecosystem = "npm"
         else:
-            return events
+            packages = extract_npm_packages(command)
+            if not packages:
+                return events
+            ecosystem = "npm"
 
         for pkg in packages:
             result = check_typosquatting(pkg, ecosystem)
