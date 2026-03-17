@@ -392,6 +392,21 @@ class AlertEngine:
                 message=f"{actor} called {server}/{method}",
                 emoji="\U0001f7e1", priority=2
             ))
+        elif event.event_type == "typosquatting_suspect":
+            similar_to = event.detail.get("similar_to", "?")
+            confidence = event.detail.get("confidence", "medium")
+            ecosystem = event.detail.get("ecosystem", "")
+            event.risk_score = 0.9 if confidence == "high" else 0.6
+            level = "critical" if confidence == "high" else "warning"
+            alerts.append(Alert(
+                level=level, category="typosquatting_suspect",
+                title="\U0001f4e6 Typosquatting Suspect Package",
+                message=(
+                    f"{actor} installing '{event.target}' via {ecosystem}\n"
+                    f"Looks like '{similar_to}' — possible typosquat or hallucination"
+                ),
+                emoji="\U0001f7e0", priority=4
+            ))
         elif event.event_type == "agent_tool_use" and tool == "WebFetch":
             # URL fetch — informational
             event.risk_score = 0.3

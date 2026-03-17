@@ -22,6 +22,11 @@ from pathlib import Path
 from typing import Optional
 
 from sentinel_mac.models import SecurityEvent
+from sentinel_mac.collectors.typosquatting import (
+    check_typosquatting,
+    extract_pip_packages,
+    extract_npm_packages,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -305,6 +310,53 @@ class AgentLogParser:
                     },
                 ))
                 break  # One match is enough
+
+        # Typosquatting check for pip/npm installs
+        events.extend(self._check_typosquatting(command, timestamp))
+
+        return events
+
+    def _check_typosquatting(self, command: str,
+                             timestamp: datetime) -> list[SecurityEvent]:
+        """Check pip/npm install commands for typosquatted package names."""
+        events = []
+
+        if "pip" in command:
+            packages = extract_pip_packages(command)
+            ecosystem = "pip"
+        elif "npm" in command:
+            packages = extract_npm_packages(command)
+            ecosystem = "npm"
+        else:
+            return events
+
+        for pkg in packages:
+            result = check_typosquatting(pkg, ecosystem)
+            if result is None:
+                continue
+
+            events.append(SecurityEvent(
+                timestamp=timestamp,
+                source="agent_log",
+                actor_pid=0,
+                actor_name="claude_code",
+                event_type="typosquatting_suspect",
+                target=pkg,
+                detail={
+                    "tool": "Bash",
+                    "command": command[:500],
+                    "ecosystem": ecosystem,
+                    "similar_to": result["similar_to"],
+                    "edit_distance": result["edit_distance"],
+                    "confidence": result["confidence"],
+                    "risk_reason": (
+                        f"typosquatting suspect: '{pkg}' "
+                        f"looks like '{result['similar_to']}' "
+                        f"(edit distance {result['edit_distance']})"
+                    ),
+                    "high_risk": result["confidence"] == "high",
+                },
+            ))
 
         return events
 
