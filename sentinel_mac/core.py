@@ -4,6 +4,7 @@ Sentinel — AI Session Guardian for macOS
 Monitors system resources and sends smart alerts via ntfy.sh
 """
 
+import json
 import logging
 import queue
 import signal
@@ -439,6 +440,153 @@ def generate_report(days: int = 1) -> None:
 
 PLIST_NAME = "com.sentinel.agent"
 PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{PLIST_NAME}.plist"
+CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
+SENTINEL_HOOK_MARKER = "sentinel hook-check"
+
+
+def _hooks_control(subcommand: str):
+    """Manage Claude Code PreToolUse hooks for Sentinel."""
+    if subcommand == "status":
+        if not CLAUDE_SETTINGS_PATH.exists():
+            print("Claude Code settings not found: ~/.claude/settings.json")
+            print("Is Claude Code installed?")
+            return
+        settings = json.loads(CLAUDE_SETTINGS_PATH.read_text())
+        hooks = settings.get("hooks", {}).get("PreToolUse", [])
+        installed = any(
+            SENTINEL_HOOK_MARKER in json.dumps(h)
+            for h in hooks
+        )
+        if installed:
+            print("✅ Sentinel hook is installed in ~/.claude/settings.json")
+        else:
+            print("❌ Sentinel hook is NOT installed")
+            print("   Run: sentinel hooks install")
+        return
+
+    if subcommand == "install":
+        sentinel_bin = sys.argv[0]
+
+        # Load or create settings
+        if CLAUDE_SETTINGS_PATH.exists():
+            try:
+                settings = json.loads(CLAUDE_SETTINGS_PATH.read_text())
+            except json.JSONDecodeError:
+                print("Error: ~/.claude/settings.json is not valid JSON")
+                return
+        else:
+            CLAUDE_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            settings = {}
+
+        hooks = settings.setdefault("hooks", {})
+        pre_tool_use = hooks.setdefault("PreToolUse", [])
+
+        # Check if already installed
+        if any(SENTINEL_HOOK_MARKER in json.dumps(h) for h in pre_tool_use):
+            print("Sentinel hook is already installed.")
+            return
+
+        pre_tool_use.append({
+            "matcher": "Bash",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"{sentinel_bin} hook-check",
+                }
+            ],
+        })
+
+        CLAUDE_SETTINGS_PATH.write_text(json.dumps(settings, indent=2))
+        print("✅ Sentinel hook installed.")
+        print("   Claude Code will now check Bash commands before execution.")
+        print("   To uninstall: sentinel hooks uninstall")
+        return
+
+    if subcommand == "uninstall":
+        if not CLAUDE_SETTINGS_PATH.exists():
+            print("Claude Code settings not found.")
+            return
+        try:
+            settings = json.loads(CLAUDE_SETTINGS_PATH.read_text())
+        except json.JSONDecodeError:
+            print("Error: ~/.claude/settings.json is not valid JSON")
+            return
+
+        pre_tool_use = settings.get("hooks", {}).get("PreToolUse", [])
+        before = len(pre_tool_use)
+        filtered = [h for h in pre_tool_use if SENTINEL_HOOK_MARKER not in json.dumps(h)]
+        settings["hooks"]["PreToolUse"] = filtered
+
+        if len(filtered) == before:
+            print("Sentinel hook was not installed.")
+            return
+
+        CLAUDE_SETTINGS_PATH.write_text(json.dumps(settings, indent=2))
+        print("✅ Sentinel hook uninstalled.")
+        return
+
+    print(f"Unknown hooks subcommand: {subcommand}")
+    print("Usage: sentinel hooks install | uninstall | status")
+
+
+def _hook_check():
+    """Called by Claude Code PreToolUse hook. Reads JSON from stdin, exits 0 (allow) or 2 (block)."""
+    from sentinel_mac.collectors.agent_log_parser import HIGH_RISK_PATTERNS
+    from sentinel_mac.collectors.typosquatting import (
+        check_typosquatting, extract_pip_packages, extract_npm_packages,
+    )
+
+    try:
+        raw = sys.stdin.read()
+        data = json.loads(raw) if raw.strip() else {}
+    except (json.JSONDecodeError, Exception):
+        sys.exit(0)  # Don't block on parse error
+
+    tool_name = data.get("tool_name", "")
+    tool_input = data.get("tool_input", {})
+
+    if tool_name != "Bash":
+        sys.exit(0)
+
+    command = tool_input.get("command", "")
+    if not command:
+        sys.exit(0)
+
+    command_lower = command.lower()
+    reasons = []
+
+    # High-risk pattern check — skip pip/npm install (handled by typosquatting below)
+    _SKIP_REASONS = {"arbitrary package install"}
+    for pattern, reason in HIGH_RISK_PATTERNS:
+        if reason in _SKIP_REASONS:
+            continue
+        if pattern.search(command_lower):
+            reasons.append(f"high-risk command: {reason}")
+            break
+
+    # Typosquatting check — block only high-confidence matches
+    if "pip" in command_lower:
+        for pkg in extract_pip_packages(command):
+            result = check_typosquatting(pkg, "pip")
+            if result and result["confidence"] == "high":
+                reasons.append(
+                    f"typosquatting suspect: '{pkg}' looks like '{result['similar_to']}'"
+                )
+    elif "npm" in command_lower:
+        for pkg in extract_npm_packages(command):
+            result = check_typosquatting(pkg, "npm")
+            if result and result["confidence"] == "high":
+                reasons.append(
+                    f"typosquatting suspect: '{pkg}' looks like '{result['similar_to']}'"
+                )
+
+    if reasons:
+        print(f"🚨 Sentinel blocked: {'; '.join(reasons)}")
+        print(f"   Command: {command[:200]}")
+        print(f"   To allow, run manually or adjust Sentinel config.")
+        sys.exit(2)
+
+    sys.exit(0)
 
 
 def _service_control(command: str):
@@ -518,20 +666,34 @@ def main():
     import argparse
     from sentinel_mac import __version__
 
+    # Handle subcommands that take their own args before argparse runs
+    if len(sys.argv) >= 2 and sys.argv[1] == "hook-check":
+        _hook_check()
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "hooks":
+        subcommand = sys.argv[2] if len(sys.argv) > 2 else "status"
+        _hooks_control(subcommand)
+        return
+
     parser = argparse.ArgumentParser(
         description="Sentinel — AI Agent Security Guardian for macOS",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="service commands:\n"
-               "  start       Start background service\n"
-               "  stop        Stop background service\n"
-               "  restart     Restart background service\n"
-               "  status      Check if service is running\n"
-               "  logs        Tail live logs (Ctrl+C to stop)",
+               "  start         Start background service\n"
+               "  stop          Stop background service\n"
+               "  restart       Restart background service\n"
+               "  status        Check if service is running\n"
+               "  logs          Tail live logs (Ctrl+C to stop)\n"
+               "\nClaude Code integration:\n"
+               "  hooks install    Register Sentinel as Claude Code PreToolUse hook\n"
+               "  hooks uninstall  Remove Claude Code hook\n"
+               "  hooks status     Check if hook is registered",
     )
     parser.add_argument("command", nargs="?", default=None,
-                        choices=["start", "stop", "restart", "status", "logs"],
+                        choices=["start", "stop", "restart", "status", "logs",
+                                 "hooks", "hook-check"],
                         metavar="command",
-                        help="start | stop | restart | status | logs")
+                        help="start | stop | restart | status | logs | hooks | hook-check")
     parser.add_argument("--config", "-c", default=None, help="Config file path")
     parser.add_argument("--once", action="store_true", help="Run once and print metrics")
     parser.add_argument("--test-notify", action="store_true", help="Send test notification")
@@ -541,6 +703,15 @@ def main():
     parser.add_argument("--init-config", action="store_true",
                         help="Generate config.yaml in ~/.config/sentinel/")
     args = parser.parse_args()
+
+    if args.command == "hook-check":
+        _hook_check()
+        return
+
+    if args.command == "hooks":
+        subcommand = sys.argv[2] if len(sys.argv) > 2 else "status"
+        _hooks_control(subcommand)
+        return
 
     if args.command:
         _service_control(args.command)
