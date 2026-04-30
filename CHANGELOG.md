@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-04-30
+
+### Added
+- Agent log parser now flags `Read` and `Edit` tool calls against sensitive files
+  (previously only `Write` was checked)
+- Sensitive-file detection broadened to filename patterns: `.env*`, `*.pem`,
+  `*.key`, `id_rsa/dsa/ecdsa/ed25519`, `.netrc`, `credentials`, `.secret(s)`,
+  `*.p12`, `*.pfx` — catches project-level secrets, not just home-directory ones
+
+### Fixed
+- AI process scan now detects Claude Code's VS Code extension native binary
+  (process name `claude`). The unambiguous-binary CPU floor is also relaxed so
+  idle AI processes still appear in `--once` mode
+
+### Changed
+- Refreshed PyPI typosquatting reference list to top-300 (2026-04 snapshot,
+  +95 packages including `google-genai`, `uv`, `mcp`, opentelemetry exporters)
+
 ### Added
 - Config validation with safe range clamping
 - Security posture monitoring (Firewall, Gatekeeper, FileVault)
