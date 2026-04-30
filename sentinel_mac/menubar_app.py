@@ -12,11 +12,14 @@ Run with `sentinel-app` after `pip install -e '.[app]'`.
 
 from __future__ import annotations
 
+import fcntl
 import logging
+import os
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import IO, Optional
 
 import rumps
 
@@ -27,6 +30,28 @@ from sentinel_mac.models import Alert, SystemMetrics
 
 POLL_SECONDS = 5
 ALERT_HISTORY_LIMIT = 5
+
+# Held for the lifetime of the process — losing this reference would release
+# the flock and let a second instance start.
+_singleton_lock_handle: Optional[IO] = None
+
+
+def _acquire_singleton_lock() -> bool:
+    """Acquire an exclusive flock so only one menubar app runs at a time.
+
+    Uses a separate lock file from the daemon's so the two can coexist.
+    """
+    global _singleton_lock_handle
+    lock_dir = Path.home() / ".local" / "share" / "sentinel"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    _singleton_lock_handle = open(lock_dir / "sentinel-app.lock", "w")
+    try:
+        fcntl.flock(_singleton_lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    _singleton_lock_handle.write(str(os.getpid()))
+    _singleton_lock_handle.flush()
+    return True
 
 
 class SentinelApp(rumps.App):
@@ -178,6 +203,17 @@ class SentinelApp(rumps.App):
 
 
 def main() -> None:
+    if not _acquire_singleton_lock():
+        message = (
+            "Another Sentinel menubar app is already running.\n"
+            "Quit the existing one (menu → Quit Sentinel) before launching a new one."
+        )
+        print(f"sentinel-app: {message}", file=sys.stderr)
+        try:
+            rumps.alert("Sentinel already running", message)
+        except Exception:
+            pass
+        sys.exit(1)
     SentinelApp().run()
 
 
