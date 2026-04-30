@@ -16,9 +16,11 @@ class MacOSCollector:
     # Only match process names that are unambiguously AI-related
     AI_PROCESS_NAMES = {
         "ollama", "llamaserver", "mlx_lm",
+        # Claude Code: npm install symlink and native binary both expose name "claude"
+        "claude", "claude-code",
     }
 
-    # Match these keywords in the full command line (more precise)
+    # Match these keywords in the full command line and executable path
     AI_CMDLINE_KEYWORDS = [
         "claude", "openai", "anthropic", "langchain",
         "llama", "ollama", "transformers", "torch",
@@ -206,35 +208,48 @@ class MacOSCollector:
     def _get_ai_processes(self) -> list:
         """Identify AI-related processes and their resource usage.
 
-        Uses a three-tier detection strategy:
-        - Tier 1: Process names that are unambiguously AI (ollama, llamaserver, etc.)
-        - Tier 2: Generic process names (python, node) that require AI keyword
-                   confirmation in their command line arguments.
-        - Tier 3: Any process with AI keyword in cmdline.
+        Detection strategy:
+        - Unambiguous: process name in AI_PROCESS_NAMES, OR executable path
+                       contains an AI keyword (catches native-binary install paths
+                       such as VS Code extension bundles where cmdline may be opaque).
+        - Ambiguous: generic name (python, node, etc.) or any process whose cmdline
+                     contains an AI keyword. Subject to a CPU floor to suppress noise.
         """
         ai_procs = []
-        for proc in psutil.process_iter(["pid", "name", "cmdline", "cpu_percent", "memory_info"]):
+        for proc in psutil.process_iter(["pid", "name", "exe", "cmdline", "cpu_percent", "memory_info"]):
             try:
                 info = proc.info
                 name = (info["name"] or "").lower()
                 cmdline = " ".join(info["cmdline"] or []).lower()
+                exe = (info["exe"] or "").lower()
 
-                is_ai = name in self.AI_PROCESS_NAMES
+                name_match = name in self.AI_PROCESS_NAMES
+                exe_match = bool(exe) and any(kw in exe for kw in self.AI_CMDLINE_KEYWORDS)
+                unambiguous = name_match or exe_match
 
+                is_ai = unambiguous
                 if not is_ai and name in self.GENERIC_PROCESS_NAMES:
                     is_ai = any(kw in cmdline for kw in self.AI_CMDLINE_KEYWORDS)
-
                 if not is_ai:
                     is_ai = any(kw in cmdline for kw in self.AI_CMDLINE_KEYWORDS)
 
-                if is_ai and (info["cpu_percent"] or 0) > 5.0:
-                    mem_mb = round((info["memory_info"].rss if info["memory_info"] else 0) / (1024**2), 1)
-                    ai_procs.append({
-                        "pid": info["pid"],
-                        "name": info["name"],
-                        "cpu": round(info["cpu_percent"] or 0, 1),
-                        "mem_mb": mem_mb,
-                    })
+                if not is_ai:
+                    continue
+
+                cpu = info["cpu_percent"] or 0
+                # CPU floor suppresses noise from generic/keyword matches; unambiguous
+                # AI binaries are always reported even when idle (psutil's first
+                # cpu_percent sample is 0, so a floor would hide them on --once).
+                if not unambiguous and cpu <= 5.0:
+                    continue
+
+                mem_mb = round((info["memory_info"].rss if info["memory_info"] else 0) / (1024**2), 1)
+                ai_procs.append({
+                    "pid": info["pid"],
+                    "name": info["name"],
+                    "cpu": round(cpu, 1),
+                    "mem_mb": mem_mb,
+                })
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
 
