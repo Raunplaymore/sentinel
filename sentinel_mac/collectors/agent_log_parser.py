@@ -30,6 +30,45 @@ from sentinel_mac.collectors.typosquatting import (
 
 logger = logging.getLogger(__name__)
 
+# ── Sensitive file path detection ─────────────────────────────────────────────
+# Prefix-based: directories where any access is sensitive
+_SENSITIVE_PREFIXES: list[str] = [
+    os.path.expanduser("~/.ssh"),
+    os.path.expanduser("~/.zshrc"),
+    os.path.expanduser("~/.bash_profile"),
+    os.path.expanduser("~/.gitconfig"),
+    "/etc/",
+    "/usr/local/bin/",
+]
+
+# Pattern-based: specific filenames sensitive regardless of directory
+_SENSITIVE_FILENAME_RE = re.compile(
+    r"(?:^|/)"
+    r"(?:"
+    r"\.env(?:\.[^/]*)?"              # .env, .env.local, .env.production, …
+    r"|\.secrets?"                    # .secret, .secrets
+    r"|credentials?"                  # credentials, credential
+    r"|id_(?:rsa|dsa|ecdsa|ed25519)"  # SSH private keys
+    r"|[^/]+\.pem"                    # *.pem
+    r"|[^/]+\.key"                    # *.key
+    r"|[^/]+\.p12"                    # *.p12 (PKCS12)
+    r"|[^/]+\.pfx"                    # *.pfx
+    r"|\.netrc"                       # ~/.netrc (stores auth tokens)
+    r")"
+    r"$",
+    re.IGNORECASE,
+)
+
+
+def _is_sensitive_path(file_path: str) -> bool:
+    """Return True if file_path targets a known-sensitive location or filename."""
+    expanded = os.path.expanduser(file_path)
+    for prefix in _SENSITIVE_PREFIXES:
+        if expanded.startswith(prefix):
+            return True
+    return bool(_SENSITIVE_FILENAME_RE.search(expanded))
+
+
 # High-risk command patterns (compiled for performance)
 HIGH_RISK_PATTERNS = [
     (re.compile(r"curl\s+.*\|\s*(?:ba)?sh"), "pipe to shell"),
@@ -261,9 +300,13 @@ class AgentLogParser:
             command = tool_input.get("command", "")
             events.extend(self._check_bash_command(command, timestamp, entry))
 
-        elif tool_name == "Write":
+        elif tool_name in ("Write", "Edit"):
             file_path = tool_input.get("file_path", "")
-            events.extend(self._check_file_write(file_path, timestamp, entry))
+            events.extend(self._check_file_write(file_path, tool_name, timestamp))
+
+        elif tool_name == "Read":
+            file_path = tool_input.get("file_path", "")
+            events.extend(self._check_file_read(file_path, timestamp))
 
         elif tool_name == "WebFetch":
             url = tool_input.get("url", "")
@@ -360,40 +403,45 @@ class AgentLogParser:
 
         return events
 
-    def _check_file_write(self, file_path: str, timestamp: datetime,
-                          entry: dict) -> list[SecurityEvent]:
-        """Check if a file write targets a sensitive location."""
-        events = []
+    def _check_file_write(self, file_path: str, tool_name: str,
+                          timestamp: datetime) -> list[SecurityEvent]:
+        """Check if a file write/edit targets a sensitive location."""
+        if not _is_sensitive_path(file_path):
+            return []
+        return [SecurityEvent(
+            timestamp=timestamp,
+            source="agent_log",
+            actor_pid=0,
+            actor_name="claude_code",
+            event_type="agent_tool_use",
+            target=file_path,
+            detail={
+                "tool": tool_name,
+                "file_path": file_path,
+                "risk_reason": "write to sensitive file",
+                "high_risk": True,
+            },
+        )]
 
-        sensitive_prefixes = [
-            os.path.expanduser("~/.ssh"),
-            os.path.expanduser("~/.env"),
-            os.path.expanduser("~/.zshrc"),
-            os.path.expanduser("~/.bash_profile"),
-            os.path.expanduser("~/.gitconfig"),
-            "/etc/",
-            "/usr/local/bin/",
-        ]
-
-        for prefix in sensitive_prefixes:
-            if file_path.startswith(prefix):
-                events.append(SecurityEvent(
-                    timestamp=timestamp,
-                    source="agent_log",
-                    actor_pid=0,
-                    actor_name="claude_code",
-                    event_type="agent_tool_use",
-                    target=file_path,
-                    detail={
-                        "tool": "Write",
-                        "file_path": file_path,
-                        "risk_reason": "write to sensitive path",
-                        "high_risk": True,
-                    },
-                ))
-                break
-
-        return events
+    def _check_file_read(self, file_path: str,
+                         timestamp: datetime) -> list[SecurityEvent]:
+        """Check if a file read targets a sensitive location."""
+        if not _is_sensitive_path(file_path):
+            return []
+        return [SecurityEvent(
+            timestamp=timestamp,
+            source="agent_log",
+            actor_pid=0,
+            actor_name="claude_code",
+            event_type="agent_tool_use",
+            target=file_path,
+            detail={
+                "tool": "Read",
+                "file_path": file_path,
+                "risk_reason": "read of sensitive file",
+                "high_risk": True,
+            },
+        )]
 
     def _handle_mcp_tool_call(self, tool_name: str, tool_input: dict,
                               timestamp: datetime):
