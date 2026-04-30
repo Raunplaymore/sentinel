@@ -19,9 +19,10 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import IO, Optional
+from typing import IO, Any, Optional
 
 import rumps
+import yaml
 
 from sentinel_mac.collectors.system import MacOSCollector
 from sentinel_mac.core import load_config, resolve_config_path, resolve_data_dir
@@ -31,9 +32,93 @@ from sentinel_mac.models import Alert, SystemMetrics
 POLL_SECONDS = 5
 ALERT_HISTORY_LIMIT = 5
 
+# ── Detection rules surfaced in the Settings menu ─────────────────────────────
+# Top-level: each maps to a real config key the daemon honors today.
+DETECTION_RULES: list[dict] = [
+    {
+        "title": "Security layer (master)",
+        "description": (
+            "Master switch — turns all detection collectors below on/off."
+        ),
+        "config_path": ("security", "enabled"),
+        "default": True,
+    },
+    {
+        "title": "File system watcher",
+        "description": (
+            "Watches sensitive paths (~/.ssh, ~/.aws, ~/.env, …) for AI "
+            "process file access; also flags bulk changes and new executables."
+        ),
+        "config_path": ("security", "fs_watcher", "enabled"),
+        "default": True,
+    },
+    {
+        "title": "Network tracker",
+        "description": (
+            "Flags AI process outbound connections to non-allowlisted hosts "
+            "(potential data exfiltration)."
+        ),
+        "config_path": ("security", "net_tracker", "enabled"),
+        "default": True,
+    },
+    {
+        "title": "Agent log parser",
+        "description": (
+            "Reads Claude Code / Cursor session logs to flag risky tool "
+            "calls, sensitive file access, MCP injection, typosquatting."
+        ),
+        "config_path": ("security", "agent_logs", "enabled"),
+        "default": True,
+    },
+]
+
+# Sub-rules bundled inside the Agent log parser. Currently informational —
+# enabling/disabling individually requires collector-side changes.
+AGENT_LOG_SUBRULES: list[tuple[str, str]] = [
+    ("Risky Bash commands", "curl|sh, rm -rf, chmod +x, base64 -d, pip install …"),
+    ("Sensitive file R/W/Edit", ".env*, .ssh/, credentials, *.pem, id_rsa, .netrc"),
+    ("WebFetch URLs", "Logs URL fetches performed by the agent."),
+    ("MCP tool calls", "Detects suspicious MCP server tool invocations."),
+    ("Typosquatting (pip/npm)", "Flags installs of names similar to top-300 packages."),
+]
+
 # Held for the lifetime of the process — losing this reference would release
 # the flock and let a second instance start.
 _singleton_lock_handle: Optional[IO] = None
+
+
+def _get_nested(config: dict, path: tuple[str, ...], default: Any) -> Any:
+    """Walk a path through nested dicts; return default if any segment is missing."""
+    cur: Any = config
+    for key in path:
+        if not isinstance(cur, dict) or key not in cur:
+            return default
+        cur = cur[key]
+    return cur
+
+
+def _set_nested(config: dict, path: tuple[str, ...], value: Any) -> None:
+    """Walk a path, creating intermediate dicts as needed; set the leaf."""
+    cur = config
+    for key in path[:-1]:
+        if not isinstance(cur.get(key), dict):
+            cur[key] = {}
+        cur = cur[key]
+    cur[path[-1]] = value
+
+
+def _save_config(config_path: Path, config: dict) -> None:
+    """Atomically write config to disk. Comments are NOT preserved (pyyaml)."""
+    tmp = config_path.with_suffix(config_path.suffix + ".tmp")
+    with open(tmp, "w") as f:
+        yaml.safe_dump(
+            config,
+            f,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True,
+        )
+    tmp.replace(config_path)
 
 
 def _acquire_singleton_lock() -> bool:
@@ -58,12 +143,15 @@ class SentinelApp(rumps.App):
     def __init__(self) -> None:
         super().__init__("Sentinel", title="🛡 …", quit_button=None)
 
-        config = load_config(resolve_config_path())
+        self._config_path: Optional[Path] = resolve_config_path()
+        self._config = load_config(self._config_path)
         self._collector = MacOSCollector()
-        self._engine = AlertEngine(config)
+        self._engine = AlertEngine(self._config)
         self._paused = False
         self._last_metrics: Optional[SystemMetrics] = None
         self._alert_history: list[tuple[datetime, Alert]] = []
+        self._rule_items: dict[str, rumps.MenuItem] = {}
+        self._comment_loss_acknowledged = False
 
         self._cpu_item = rumps.MenuItem("CPU: —")
         self._mem_item = rumps.MenuItem("MEM: —")
@@ -79,6 +167,7 @@ class SentinelApp(rumps.App):
         self._pause_item = rumps.MenuItem(
             "Pause monitoring", callback=self._on_toggle_pause
         )
+        self._settings_submenu = self._build_settings_menu()
         self._open_log_item = rumps.MenuItem("Open Log", callback=self._on_open_log)
         self._quit_item = rumps.MenuItem("Quit Sentinel", callback=rumps.quit_application)
 
@@ -97,12 +186,55 @@ class SentinelApp(rumps.App):
             self._scan_item,
             self._pause_item,
             None,
+            self._settings_submenu,
+            None,
             self._open_log_item,
             None,
             self._quit_item,
         ]
 
         self._refresh()
+
+    def _build_settings_menu(self) -> rumps.MenuItem:
+        rules_submenu = rumps.MenuItem("Detection Rules")
+
+        # Master switch first, separated from individual collectors.
+        master = self._make_rule_item(DETECTION_RULES[0])
+        rules_submenu.add(master)
+        rules_submenu.add(None)
+
+        for rule in DETECTION_RULES[1:]:
+            rules_submenu.add(self._make_rule_item(rule))
+
+        rules_submenu.add(None)
+
+        bundled = rumps.MenuItem("Agent log: bundled rules")
+        for title, desc in AGENT_LOG_SUBRULES:
+            # Inline description; no callback → click does nothing.
+            bundled.add(rumps.MenuItem(f"• {title}  —  {desc}"))
+        rules_submenu.add(bundled)
+
+        rules_submenu.add(None)
+        rules_submenu.add(
+            rumps.MenuItem("About these rules…", callback=self._on_about_rules)
+        )
+
+        settings = rumps.MenuItem("Settings")
+        settings.add(rules_submenu)
+        if self._config_path:
+            settings.add(
+                rumps.MenuItem("Open config.yaml", callback=self._on_open_config)
+            )
+        return settings
+
+    def _make_rule_item(self, rule: dict) -> rumps.MenuItem:
+        item = rumps.MenuItem(rule["title"], callback=self._on_toggle_rule)
+        item._sentinel_rule = rule  # type: ignore[attr-defined]
+        item.state = 1 if _get_nested(
+            self._config, rule["config_path"], rule["default"]
+        ) else 0
+        self._rule_items[rule["title"]] = item
+        return item
 
     @rumps.timer(POLL_SECONDS)
     def _on_tick(self, _sender) -> None:
@@ -125,6 +257,68 @@ class SentinelApp(rumps.App):
             subprocess.Popen(["open", str(log_path)])
         else:
             rumps.alert("Log not found", f"Expected at: {log_path}")
+
+    def _on_toggle_rule(self, sender) -> None:
+        rule = getattr(sender, "_sentinel_rule", None)
+        if not rule:
+            return
+
+        new_state = 0 if sender.state else 1
+        sender.state = new_state
+        new_value = bool(new_state)
+        _set_nested(self._config, rule["config_path"], new_value)
+
+        if not self._config_path:
+            rumps.alert(
+                "Saved in memory only",
+                "No config.yaml was found, so this toggle won't persist.\n"
+                "Copy config.example.yaml → config.yaml to enable persistence.",
+            )
+            return
+
+        if not self._comment_loss_acknowledged and self._config_path.exists():
+            self._comment_loss_acknowledged = True
+            rumps.alert(
+                "Heads up",
+                "Saving from the menubar will rewrite config.yaml without "
+                "comments (PoC limitation). Your settings are preserved; "
+                "only YAML comments are lost.",
+            )
+
+        try:
+            _save_config(self._config_path, self._config)
+        except Exception as exc:
+            logging.exception("save_config failed")
+            rumps.alert("Could not save config", str(exc))
+            return
+
+        try:
+            rumps.notification(
+                "Setting saved",
+                rule["title"],
+                "Restart the daemon to apply: launchctl unload/load "
+                "~/Library/LaunchAgents/com.sentinel.agent.plist",
+            )
+        except Exception:
+            # Notifications can fail on first run before TCC consent.
+            pass
+
+    def _on_about_rules(self, _sender) -> None:
+        lines = ["Sentinel watches the following AI behaviors:", ""]
+        for r in DETECTION_RULES:
+            lines.append(f"• {r['title']}")
+            lines.append(f"    {r['description']}")
+            lines.append("")
+        lines.append("Bundled inside the Agent log parser:")
+        for title, desc in AGENT_LOG_SUBRULES:
+            lines.append(f"  • {title}: {desc}")
+        rumps.alert("Sentinel — Detection Rules", "\n".join(lines))
+
+    def _on_open_config(self, _sender) -> None:
+        if self._config_path and self._config_path.exists():
+            subprocess.Popen(["open", str(self._config_path)])
+        else:
+            rumps.alert("config.yaml not found", "No user config to open.")
 
     def _refresh(self) -> None:
         try:
