@@ -15,9 +15,10 @@ from __future__ import annotations
 import fcntl
 import logging
 import os
+import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import IO, Any, Optional
 
@@ -31,6 +32,11 @@ from sentinel_mac.models import Alert, SystemMetrics
 
 POLL_SECONDS = 5
 ALERT_HISTORY_LIMIT = 5
+LOG_WINDOW_HOURS = 12
+
+# Logger format is "%(asctime)s [%(levelname)s] %(message)s" — asctime defaults
+# to "YYYY-MM-DD HH:MM:SS,sss".
+_LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 
 # ── Detection rules surfaced in the Settings menu ─────────────────────────────
 # Top-level: each maps to a real config key the daemon honors today.
@@ -85,6 +91,43 @@ AGENT_LOG_SUBRULES: list[tuple[str, str]] = [
 # Held for the lifetime of the process — losing this reference would release
 # the flock and let a second instance start.
 _singleton_lock_handle: Optional[IO] = None
+
+
+def _parse_log_timestamp(line: str) -> Optional[datetime]:
+    m = _LOG_TS_RE.match(line)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _recent_log_entries(log_path: Path, hours: int) -> list[str]:
+    """Return log entries within the last N hours, oldest-first.
+
+    Continuation lines (no timestamp prefix, e.g. traceback frames) stay
+    grouped with their parent entry so reversal doesn't scramble tracebacks.
+    """
+    cutoff = datetime.now() - timedelta(hours=hours)
+    entries: list[str] = []
+    cur_lines: list[str] = []
+    cur_keep = False
+
+    with open(log_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            ts = _parse_log_timestamp(line)
+            if ts is not None:
+                if cur_keep and cur_lines:
+                    entries.append("".join(cur_lines))
+                cur_lines = [line]
+                cur_keep = ts >= cutoff
+            else:
+                cur_lines.append(line)
+        if cur_keep and cur_lines:
+            entries.append("".join(cur_lines))
+
+    return entries
 
 
 def _get_nested(config: dict, path: tuple[str, ...], default: Any) -> Any:
@@ -252,11 +295,35 @@ class SentinelApp(rumps.App):
             self.title = "🛡 ⏸"
 
     def _on_open_log(self, _sender) -> None:
-        log_path = resolve_data_dir() / "sentinel.log"
-        if log_path.exists():
-            subprocess.Popen(["open", str(log_path)])
-        else:
+        data_dir = resolve_data_dir()
+        log_path = data_dir / "sentinel.log"
+        if not log_path.exists():
             rumps.alert("Log not found", f"Expected at: {log_path}")
+            return
+
+        try:
+            entries = _recent_log_entries(log_path, LOG_WINDOW_HOURS)
+        except Exception as exc:
+            logging.exception("log read failed")
+            rumps.alert("Log read failed", str(exc))
+            return
+
+        # Newest first so the default "open at top" behavior of TextEdit/
+        # Console.app lands on the most recent entry.
+        header = (
+            f"# Sentinel log — last {LOG_WINDOW_HOURS} hours, newest first\n"
+            f"# {len(entries)} entries from {log_path}\n"
+            f"# Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        )
+        body = (
+            "".join(reversed(entries))
+            if entries
+            else f"(no log entries in the last {LOG_WINDOW_HOURS} hours)\n"
+        )
+
+        out = data_dir / f"sentinel-recent-{LOG_WINDOW_HOURS}h.log"
+        out.write_text(header + body)
+        subprocess.Popen(["open", str(out)])
 
     def _on_toggle_rule(self, sender) -> None:
         rule = getattr(sender, "_sentinel_rule", None)
