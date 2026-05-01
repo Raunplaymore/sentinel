@@ -483,6 +483,44 @@ Each line is a JSON object:
 
 Logs are automatically cleaned up after **90 days** (configurable). These logs are the foundation for the upcoming team dashboard (Phase 2).
 
+## Privacy & Data
+
+Sentinel keeps everything **local by default**. Below is a complete list of what it watches, what it stores, and where.
+
+### What Sentinel watches
+
+By default, the file system watcher (FSWatcher) watches your **home directory** (`~`) for changes attributed to AI processes. The default `watch_paths` in the example config also include:
+
+- `~/.ssh`, `~/.env`, `~/.config`, `~/.zshrc`, `~/.bash_profile`, `~/.gitconfig`, `~/.aws` — sensitive credential locations (also listed under `sensitive_paths`)
+- `~/Desktop`, `~/Documents`, `~/Downloads` — common working directories where AI agents typically write files
+
+If you do not want Sentinel to observe a particular path, edit `watch_paths` and `sensitive_paths` in your `config.yaml`. The watcher only acts on changes attributed to AI processes (ollama, claude, python with AI libraries, etc.) — non-AI activity is not logged.
+
+### What Sentinel writes to disk
+
+| Location | Purpose | Retention |
+|---|---|---|
+| `~/.local/share/sentinel/events/YYYY-MM-DD.jsonl` | Daily security event audit log | 90 days, then auto-deleted |
+| `~/.local/share/sentinel/sentinel.lock` | Single-instance lock | While running |
+| `~/.config/sentinel/config.yaml` | User config (you create this) | Until you remove it |
+| `~/.local/share/sentinel/host_context.jsonl` | (v0.6+, opt-in) Frequency counter for context-aware detection. Created only when `security.context_aware.enabled: true`. Parent directory is `0o700`, file is `0o600`. | Sliding 30-day learning window |
+
+Event logs contain hostnames you connect to, file paths AI processes touched, and Bash commands AI agents ran. They do not contain file contents.
+
+### What leaves your machine
+
+**Nothing**, unless you opt in. Sentinel never sends telemetry. Network traffic only happens for the notification channels you explicitly configure:
+
+- ntfy.sh — alert title and body sent to your topic (set `ntfy_topic`)
+- Slack — alert sent to your webhook (set `slack_webhook`)
+- Telegram — alert sent to your bot/chat (set `telegram_bot_token` + `telegram_chat_id`)
+
+macOS native notifications stay on your machine.
+
+### Disabling local logging
+
+To stop writing event logs, set `security.enabled: false` in your config — the daemon still runs system health checks but the security layer (FSWatcher / NetTracker / AgentLogParser) is fully off.
+
 ## Reliability
 
 - **Log Rotation** — Daily JSONL files, auto-deleted after 90 days
