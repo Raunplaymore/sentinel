@@ -111,6 +111,15 @@ security:
       # - type: "cursor"
       #   log_dir: "~/Library/Application Support/Cursor/User/workspaceStorage"
 
+    # Per-rule toggles. Set any to false to silence that detection without
+    # disabling the whole agent log parser. Defaults to true.
+    rules:
+      bash: true                         # Risky Bash commands (curl|sh, rm -rf, …)
+      sensitive_file: true               # .env*, .ssh/, credentials, *.pem, …
+      web_fetch: true                    # WebFetch URL tracking
+      mcp: true                          # MCP tool calls + injection detection
+      typosquatting: true                # pip/npm install of mistyped names
+
   # ── Custom Rules (Advanced) ──
   # Define your own regex-based detection rules.
   # source: fs_watcher, agent_log, net_tracker, or "all"

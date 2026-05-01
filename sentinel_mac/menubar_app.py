@@ -97,14 +97,39 @@ DETECTION_RULES: list[dict] = [
     },
 ]
 
-# Sub-rules bundled inside the Agent log parser. Currently informational —
-# enabling/disabling individually requires collector-side changes.
-AGENT_LOG_SUBRULES: list[tuple[str, str]] = [
-    ("Risky Bash commands", "curl|sh, rm -rf, chmod +x, base64 -d, pip install …"),
-    ("Sensitive file R/W/Edit", ".env*, .ssh/, credentials, *.pem, id_rsa, .netrc"),
-    ("WebFetch URLs", "Logs URL fetches performed by the agent."),
-    ("MCP tool calls", "Detects suspicious MCP server tool invocations."),
-    ("Typosquatting (pip/npm)", "Flags installs of names similar to top-300 packages."),
+# Sub-rules bundled inside the Agent log parser. Each maps to a config key
+# under security.agent_logs.rules.* that AgentLogParser honors per-rule.
+AGENT_LOG_SUBRULES: list[dict] = [
+    {
+        "title": "Risky Bash commands",
+        "description": "curl|sh, rm -rf, chmod +x, base64 -d, pip install …",
+        "config_path": ("security", "agent_logs", "rules", "bash"),
+        "default": True,
+    },
+    {
+        "title": "Sensitive file R/W/Edit",
+        "description": ".env*, .ssh/, credentials, *.pem, id_rsa, .netrc",
+        "config_path": ("security", "agent_logs", "rules", "sensitive_file"),
+        "default": True,
+    },
+    {
+        "title": "WebFetch URLs",
+        "description": "Logs URL fetches performed by the agent.",
+        "config_path": ("security", "agent_logs", "rules", "web_fetch"),
+        "default": True,
+    },
+    {
+        "title": "MCP tool calls",
+        "description": "Detects suspicious MCP server tool invocations.",
+        "config_path": ("security", "agent_logs", "rules", "mcp"),
+        "default": True,
+    },
+    {
+        "title": "Typosquatting (pip/npm)",
+        "description": "Flags installs of names similar to top-300 packages.",
+        "config_path": ("security", "agent_logs", "rules", "typosquatting"),
+        "default": True,
+    },
 ]
 
 # Held for the lifetime of the process — losing this reference would release
@@ -305,9 +330,8 @@ class SentinelApp(rumps.App):
         rules_submenu.add(None)
 
         bundled = rumps.MenuItem("Agent log: bundled rules")
-        for title, desc in AGENT_LOG_SUBRULES:
-            # Inline description; no callback → click does nothing.
-            bundled.add(rumps.MenuItem(f"• {title}  —  {desc}"))
+        for rule in AGENT_LOG_SUBRULES:
+            bundled.add(self._make_rule_item(rule))
         rules_submenu.add(bundled)
 
         rules_submenu.add(None)
@@ -430,9 +454,9 @@ class SentinelApp(rumps.App):
             lines.append(f"• {r['title']}")
             lines.append(f"    {r['description']}")
             lines.append("")
-        lines.append("Bundled inside the Agent log parser:")
-        for title, desc in AGENT_LOG_SUBRULES:
-            lines.append(f"  • {title}: {desc}")
+        lines.append("Bundled inside the Agent log parser (each toggleable):")
+        for r in AGENT_LOG_SUBRULES:
+            lines.append(f"  • {r['title']}: {r['description']}")
         rumps.alert("Sentinel — Detection Rules", "\n".join(lines))
 
     def _on_open_config(self, _sender) -> None:

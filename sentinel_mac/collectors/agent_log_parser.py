@@ -132,6 +132,16 @@ class AgentLogParser:
             {"type": "claude_code", "log_dir": "~/.claude/projects"},
         ])
 
+        # Per-rule toggles. All default ON (matches the parser's prior
+        # behavior). Disabling a rule short-circuits its detection path so
+        # the corresponding events are never queued.
+        rules_config = sec_config.get("rules", {}) or {}
+        self._rule_bash = bool(rules_config.get("bash", True))
+        self._rule_sensitive_file = bool(rules_config.get("sensitive_file", True))
+        self._rule_web_fetch = bool(rules_config.get("web_fetch", True))
+        self._rule_mcp = bool(rules_config.get("mcp", True))
+        self._rule_typosquatting = bool(rules_config.get("typosquatting", True))
+
         # Track file positions for tail-f style reading
         # Key: file path, Value: last read position
         self._file_positions: dict[str, int] = {}
@@ -257,7 +267,8 @@ class AgentLogParser:
 
         # Check tool_result for MCP injection
         if entry_type == "tool_result":
-            self._check_mcp_tool_result(entry)
+            if self._rule_mcp:
+                self._check_mcp_tool_result(entry)
             return
 
         # Only interested in assistant messages with tool_use
@@ -286,7 +297,7 @@ class AgentLogParser:
                 timestamp = datetime.now()
 
             # Track MCP tool calls
-            if tool_name.startswith("mcp__"):
+            if tool_name.startswith("mcp__") and self._rule_mcp:
                 self._handle_mcp_tool_call(tool_name, tool_input, timestamp)
 
             self._evaluate_tool_call(tool_name, tool_input, timestamp, entry)
@@ -298,17 +309,22 @@ class AgentLogParser:
 
         if tool_name == "Bash":
             command = tool_input.get("command", "")
-            events.extend(self._check_bash_command(command, timestamp, entry))
+            if self._rule_bash:
+                events.extend(self._check_bash_command(command, timestamp, entry))
+            if self._rule_typosquatting:
+                events.extend(self._check_typosquatting(command, timestamp))
 
         elif tool_name in ("Write", "Edit"):
-            file_path = tool_input.get("file_path", "")
-            events.extend(self._check_file_write(file_path, tool_name, timestamp))
+            if self._rule_sensitive_file:
+                file_path = tool_input.get("file_path", "")
+                events.extend(self._check_file_write(file_path, tool_name, timestamp))
 
         elif tool_name == "Read":
-            file_path = tool_input.get("file_path", "")
-            events.extend(self._check_file_read(file_path, timestamp))
+            if self._rule_sensitive_file:
+                file_path = tool_input.get("file_path", "")
+                events.extend(self._check_file_read(file_path, timestamp))
 
-        elif tool_name == "WebFetch":
+        elif tool_name == "WebFetch" and self._rule_web_fetch:
             url = tool_input.get("url", "")
             events.append(SecurityEvent(
                 timestamp=timestamp,
@@ -353,9 +369,6 @@ class AgentLogParser:
                     },
                 ))
                 break  # One match is enough
-
-        # Typosquatting check for pip/npm installs
-        events.extend(self._check_typosquatting(command, timestamp))
 
         return events
 
