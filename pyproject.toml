@@ -38,6 +38,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+app = ["rumps>=0.4.0,<1"]
 
 [project.urls]
 Homepage = "https://github.com/raunplaymore/sentinel"
@@ -47,6 +48,7 @@ Funding = "https://buymeacoffee.com/pmpt_cafe"
 
 [project.scripts]
 sentinel = "sentinel_mac.core:main"
+sentinel-app = "sentinel_mac.menubar_app:main"
 
 [tool.setuptools.packages.find]
 include = ["sentinel_mac*"]
