@@ -34,6 +34,12 @@ POLL_SECONDS = 5
 ALERT_HISTORY_LIMIT = 5
 LOG_WINDOW_HOURS = 12
 
+_LEVEL_EMOJI = {
+    "critical": "🔴",
+    "warning": "🟠",
+    "info": "🟡",
+}
+
 # Logger format is "%(asctime)s [%(levelname)s] %(message)s" — asctime defaults
 # to "YYYY-MM-DD HH:MM:SS,sss".
 _LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
@@ -203,7 +209,9 @@ class SentinelApp(rumps.App):
         self._ai_summary = rumps.MenuItem("AI procs: —")
         self._ai_submenu = rumps.MenuItem("AI Processes")
         self._ai_submenu.add(rumps.MenuItem("(initializing)"))
-        self._alert_summary = rumps.MenuItem("No recent alerts")
+        self._alert_summary = rumps.MenuItem(
+            "No recent alerts", callback=self._on_summary_clicked
+        )
         self._alert_submenu = rumps.MenuItem("Recent Alerts")
         self._alert_submenu.add(rumps.MenuItem("(none)"))
         self._scan_item = rumps.MenuItem("Scan Now", callback=self._on_scan_now)
@@ -451,16 +459,47 @@ class SentinelApp(rumps.App):
         if not self._alert_history:
             self._alert_summary.title = "No recent alerts"
         else:
-            _, top = self._alert_history[0]
-            self._alert_summary.title = f"⚠ {top.title}"
+            ts, top = self._alert_history[0]
+            emoji = _LEVEL_EMOJI.get(top.level, "•")
+            self._alert_summary.title = f"{emoji} {ts.strftime('%H:%M:%S')}  {top.title}"
 
         self._alert_submenu.clear()
         if not self._alert_history:
             self._alert_submenu.add(rumps.MenuItem("(none)"))
             return
         for ts, alert in self._alert_history:
-            label = f"[{alert.level.upper()}] {ts.strftime('%H:%M:%S')} · {alert.title}"
-            self._alert_submenu.add(rumps.MenuItem(label))
+            self._alert_submenu.add(self._make_alert_item(ts, alert))
+
+    def _make_alert_item(self, ts: datetime, alert: Alert) -> rumps.MenuItem:
+        emoji = _LEVEL_EMOJI.get(alert.level, "•")
+        label = f"{emoji} {ts.strftime('%H:%M:%S')}  {alert.title}"
+        item = rumps.MenuItem(label, callback=self._on_alert_clicked)
+        # Stash so the click handler can recover the full alert.
+        item._sentinel_alert = (ts, alert)  # type: ignore[attr-defined]
+        return item
+
+    def _on_alert_clicked(self, sender) -> None:
+        payload = getattr(sender, "_sentinel_alert", None)
+        if payload is None:
+            return
+        ts, alert = payload
+        self._show_alert_detail(ts, alert)
+
+    def _on_summary_clicked(self, _sender) -> None:
+        if not self._alert_history:
+            return
+        ts, alert = self._alert_history[0]
+        self._show_alert_detail(ts, alert)
+
+    def _show_alert_detail(self, ts: datetime, alert: Alert) -> None:
+        emoji = _LEVEL_EMOJI.get(alert.level, "•")
+        body = (
+            f"When:     {ts.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Severity: {emoji} {alert.level.upper()}  ·  Category: {alert.category}\n"
+            f"\n"
+            f"{alert.message}"
+        )
+        rumps.alert(alert.title, body)
 
 
 def main() -> None:
