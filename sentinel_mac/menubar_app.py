@@ -43,6 +43,10 @@ _LEVEL_EMOJI = {
 # Logger format is "%(asctime)s [%(levelname)s] %(message)s" — asctime defaults
 # to "YYYY-MM-DD HH:MM:SS,sss".
 _LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+_LOG_LEVEL_RE = re.compile(r"\[(DEBUG|INFO|WARNING|ERROR|CRITICAL)\]")
+_LOG_LEVEL_PRIORITY = {
+    "DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50,
+}
 
 # ── Detection rules surfaced in the Settings menu ─────────────────────────────
 # Top-level: each maps to a real config key the daemon honors today.
@@ -109,28 +113,45 @@ def _parse_log_timestamp(line: str) -> Optional[datetime]:
         return None
 
 
-def _recent_log_entries(log_path: Path, hours: int) -> list[str]:
+def _recent_log_entries(
+    log_path: Path, hours: int, min_level: Optional[str] = None
+) -> list[str]:
     """Return log entries within the last N hours, oldest-first.
 
     Continuation lines (no timestamp prefix, e.g. traceback frames) stay
     grouped with their parent entry so reversal doesn't scramble tracebacks.
+
+    If `min_level` is given (e.g. "WARNING"), entries below that Python
+    logging level are dropped. Sentinel's daemon dispatches every alert at
+    WARNING level, so min_level="WARNING" effectively yields "alerts only".
     """
     cutoff = datetime.now() - timedelta(hours=hours)
+    min_priority = _LOG_LEVEL_PRIORITY.get(min_level or "", 0)
+
     entries: list[str] = []
     cur_lines: list[str] = []
-    cur_keep = False
+    cur_in_window = False
+    cur_passes_level = False
 
     with open(log_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             ts = _parse_log_timestamp(line)
             if ts is not None:
-                if cur_keep and cur_lines:
+                if cur_in_window and cur_passes_level and cur_lines:
                     entries.append("".join(cur_lines))
                 cur_lines = [line]
-                cur_keep = ts >= cutoff
+                cur_in_window = ts >= cutoff
+                if min_priority == 0:
+                    cur_passes_level = True
+                else:
+                    m = _LOG_LEVEL_RE.search(line)
+                    cur_passes_level = (
+                        m is not None
+                        and _LOG_LEVEL_PRIORITY.get(m.group(1), 0) >= min_priority
+                    )
             else:
                 cur_lines.append(line)
-        if cur_keep and cur_lines:
+        if cur_in_window and cur_passes_level and cur_lines:
             entries.append("".join(cur_lines))
 
     return entries
@@ -219,7 +240,15 @@ class SentinelApp(rumps.App):
             "Pause monitoring", callback=self._on_toggle_pause
         )
         self._settings_submenu = self._build_settings_menu()
-        self._open_log_item = rumps.MenuItem("Open Log", callback=self._on_open_log)
+        self._open_log_item = rumps.MenuItem("Open Log")
+        self._open_log_item.add(rumps.MenuItem(
+            f"Warnings only · last {LOG_WINDOW_HOURS}h",
+            callback=self._on_open_warning_log,
+        ))
+        self._open_log_item.add(rumps.MenuItem(
+            f"All entries · last {LOG_WINDOW_HOURS}h",
+            callback=self._on_open_all_log,
+        ))
         self._quit_item = rumps.MenuItem("Quit Sentinel", callback=rumps.quit_application)
 
         self.menu = [
@@ -302,7 +331,17 @@ class SentinelApp(rumps.App):
         if self._paused:
             self.title = "🛡 ⏸"
 
-    def _on_open_log(self, _sender) -> None:
+    def _on_open_all_log(self, _sender) -> None:
+        self._open_log_view(min_level=None, suffix="all", label="all levels")
+
+    def _on_open_warning_log(self, _sender) -> None:
+        self._open_log_view(
+            min_level="WARNING", suffix="warnings", label="WARNING+ only (alerts)"
+        )
+
+    def _open_log_view(
+        self, min_level: Optional[str], suffix: str, label: str
+    ) -> None:
         data_dir = resolve_data_dir()
         log_path = data_dir / "sentinel.log"
         if not log_path.exists():
@@ -310,7 +349,7 @@ class SentinelApp(rumps.App):
             return
 
         try:
-            entries = _recent_log_entries(log_path, LOG_WINDOW_HOURS)
+            entries = _recent_log_entries(log_path, LOG_WINDOW_HOURS, min_level)
         except Exception as exc:
             logging.exception("log read failed")
             rumps.alert("Log read failed", str(exc))
@@ -319,17 +358,17 @@ class SentinelApp(rumps.App):
         # Newest first so the default "open at top" behavior of TextEdit/
         # Console.app lands on the most recent entry.
         header = (
-            f"# Sentinel log — last {LOG_WINDOW_HOURS} hours, newest first\n"
+            f"# Sentinel log — last {LOG_WINDOW_HOURS} hours, {label}, newest first\n"
             f"# {len(entries)} entries from {log_path}\n"
             f"# Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         )
         body = (
             "".join(reversed(entries))
             if entries
-            else f"(no log entries in the last {LOG_WINDOW_HOURS} hours)\n"
+            else f"(no matching log entries in the last {LOG_WINDOW_HOURS} hours)\n"
         )
 
-        out = data_dir / f"sentinel-recent-{LOG_WINDOW_HOURS}h.log"
+        out = data_dir / f"sentinel-recent-{LOG_WINDOW_HOURS}h-{suffix}.log"
         out.write_text(header + body)
         subprocess.Popen(["open", str(out)])
 
