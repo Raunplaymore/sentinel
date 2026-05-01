@@ -34,9 +34,19 @@ POLL_SECONDS = 5
 ALERT_HISTORY_LIMIT = 5
 LOG_WINDOW_HOURS = 12
 
+_LEVEL_EMOJI = {
+    "critical": "🔴",
+    "warning": "🟠",
+    "info": "🟡",
+}
+
 # Logger format is "%(asctime)s [%(levelname)s] %(message)s" — asctime defaults
 # to "YYYY-MM-DD HH:MM:SS,sss".
 _LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+_LOG_LEVEL_RE = re.compile(r"\[(DEBUG|INFO|WARNING|ERROR|CRITICAL)\]")
+_LOG_LEVEL_PRIORITY = {
+    "DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50,
+}
 
 # ── Detection rules surfaced in the Settings menu ─────────────────────────────
 # Top-level: each maps to a real config key the daemon honors today.
@@ -103,28 +113,45 @@ def _parse_log_timestamp(line: str) -> Optional[datetime]:
         return None
 
 
-def _recent_log_entries(log_path: Path, hours: int) -> list[str]:
+def _recent_log_entries(
+    log_path: Path, hours: int, min_level: Optional[str] = None
+) -> list[str]:
     """Return log entries within the last N hours, oldest-first.
 
     Continuation lines (no timestamp prefix, e.g. traceback frames) stay
     grouped with their parent entry so reversal doesn't scramble tracebacks.
+
+    If `min_level` is given (e.g. "WARNING"), entries below that Python
+    logging level are dropped. Sentinel's daemon dispatches every alert at
+    WARNING level, so min_level="WARNING" effectively yields "alerts only".
     """
     cutoff = datetime.now() - timedelta(hours=hours)
+    min_priority = _LOG_LEVEL_PRIORITY.get(min_level or "", 0)
+
     entries: list[str] = []
     cur_lines: list[str] = []
-    cur_keep = False
+    cur_in_window = False
+    cur_passes_level = False
 
     with open(log_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             ts = _parse_log_timestamp(line)
             if ts is not None:
-                if cur_keep and cur_lines:
+                if cur_in_window and cur_passes_level and cur_lines:
                     entries.append("".join(cur_lines))
                 cur_lines = [line]
-                cur_keep = ts >= cutoff
+                cur_in_window = ts >= cutoff
+                if min_priority == 0:
+                    cur_passes_level = True
+                else:
+                    m = _LOG_LEVEL_RE.search(line)
+                    cur_passes_level = (
+                        m is not None
+                        and _LOG_LEVEL_PRIORITY.get(m.group(1), 0) >= min_priority
+                    )
             else:
                 cur_lines.append(line)
-        if cur_keep and cur_lines:
+        if cur_in_window and cur_passes_level and cur_lines:
             entries.append("".join(cur_lines))
 
     return entries
@@ -203,7 +230,9 @@ class SentinelApp(rumps.App):
         self._ai_summary = rumps.MenuItem("AI procs: —")
         self._ai_submenu = rumps.MenuItem("AI Processes")
         self._ai_submenu.add(rumps.MenuItem("(initializing)"))
-        self._alert_summary = rumps.MenuItem("No recent alerts")
+        self._alert_summary = rumps.MenuItem(
+            "No recent alerts", callback=self._on_summary_clicked
+        )
         self._alert_submenu = rumps.MenuItem("Recent Alerts")
         self._alert_submenu.add(rumps.MenuItem("(none)"))
         self._scan_item = rumps.MenuItem("Scan Now", callback=self._on_scan_now)
@@ -211,7 +240,15 @@ class SentinelApp(rumps.App):
             "Pause monitoring", callback=self._on_toggle_pause
         )
         self._settings_submenu = self._build_settings_menu()
-        self._open_log_item = rumps.MenuItem("Open Log", callback=self._on_open_log)
+        self._open_log_item = rumps.MenuItem("Open Log")
+        self._open_log_item.add(rumps.MenuItem(
+            f"Warnings only · last {LOG_WINDOW_HOURS}h",
+            callback=self._on_open_warning_log,
+        ))
+        self._open_log_item.add(rumps.MenuItem(
+            f"All entries · last {LOG_WINDOW_HOURS}h",
+            callback=self._on_open_all_log,
+        ))
         self._quit_item = rumps.MenuItem("Quit Sentinel", callback=rumps.quit_application)
 
         self.menu = [
@@ -294,7 +331,17 @@ class SentinelApp(rumps.App):
         if self._paused:
             self.title = "🛡 ⏸"
 
-    def _on_open_log(self, _sender) -> None:
+    def _on_open_all_log(self, _sender) -> None:
+        self._open_log_view(min_level=None, suffix="all", label="all levels")
+
+    def _on_open_warning_log(self, _sender) -> None:
+        self._open_log_view(
+            min_level="WARNING", suffix="warnings", label="WARNING+ only (alerts)"
+        )
+
+    def _open_log_view(
+        self, min_level: Optional[str], suffix: str, label: str
+    ) -> None:
         data_dir = resolve_data_dir()
         log_path = data_dir / "sentinel.log"
         if not log_path.exists():
@@ -302,7 +349,7 @@ class SentinelApp(rumps.App):
             return
 
         try:
-            entries = _recent_log_entries(log_path, LOG_WINDOW_HOURS)
+            entries = _recent_log_entries(log_path, LOG_WINDOW_HOURS, min_level)
         except Exception as exc:
             logging.exception("log read failed")
             rumps.alert("Log read failed", str(exc))
@@ -311,17 +358,17 @@ class SentinelApp(rumps.App):
         # Newest first so the default "open at top" behavior of TextEdit/
         # Console.app lands on the most recent entry.
         header = (
-            f"# Sentinel log — last {LOG_WINDOW_HOURS} hours, newest first\n"
+            f"# Sentinel log — last {LOG_WINDOW_HOURS} hours, {label}, newest first\n"
             f"# {len(entries)} entries from {log_path}\n"
             f"# Generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         )
         body = (
             "".join(reversed(entries))
             if entries
-            else f"(no log entries in the last {LOG_WINDOW_HOURS} hours)\n"
+            else f"(no matching log entries in the last {LOG_WINDOW_HOURS} hours)\n"
         )
 
-        out = data_dir / f"sentinel-recent-{LOG_WINDOW_HOURS}h.log"
+        out = data_dir / f"sentinel-recent-{LOG_WINDOW_HOURS}h-{suffix}.log"
         out.write_text(header + body)
         subprocess.Popen(["open", str(out)])
 
@@ -451,16 +498,47 @@ class SentinelApp(rumps.App):
         if not self._alert_history:
             self._alert_summary.title = "No recent alerts"
         else:
-            _, top = self._alert_history[0]
-            self._alert_summary.title = f"⚠ {top.title}"
+            ts, top = self._alert_history[0]
+            emoji = _LEVEL_EMOJI.get(top.level, "•")
+            self._alert_summary.title = f"{emoji} {ts.strftime('%H:%M:%S')}  {top.title}"
 
         self._alert_submenu.clear()
         if not self._alert_history:
             self._alert_submenu.add(rumps.MenuItem("(none)"))
             return
         for ts, alert in self._alert_history:
-            label = f"[{alert.level.upper()}] {ts.strftime('%H:%M:%S')} · {alert.title}"
-            self._alert_submenu.add(rumps.MenuItem(label))
+            self._alert_submenu.add(self._make_alert_item(ts, alert))
+
+    def _make_alert_item(self, ts: datetime, alert: Alert) -> rumps.MenuItem:
+        emoji = _LEVEL_EMOJI.get(alert.level, "•")
+        label = f"{emoji} {ts.strftime('%H:%M:%S')}  {alert.title}"
+        item = rumps.MenuItem(label, callback=self._on_alert_clicked)
+        # Stash so the click handler can recover the full alert.
+        item._sentinel_alert = (ts, alert)  # type: ignore[attr-defined]
+        return item
+
+    def _on_alert_clicked(self, sender) -> None:
+        payload = getattr(sender, "_sentinel_alert", None)
+        if payload is None:
+            return
+        ts, alert = payload
+        self._show_alert_detail(ts, alert)
+
+    def _on_summary_clicked(self, _sender) -> None:
+        if not self._alert_history:
+            return
+        ts, alert = self._alert_history[0]
+        self._show_alert_detail(ts, alert)
+
+    def _show_alert_detail(self, ts: datetime, alert: Alert) -> None:
+        emoji = _LEVEL_EMOJI.get(alert.level, "•")
+        body = (
+            f"When:     {ts.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Severity: {emoji} {alert.level.upper()}  ·  Category: {alert.category}\n"
+            f"\n"
+            f"{alert.message}"
+        )
+        rumps.alert(alert.title, body)
 
 
 def main() -> None:

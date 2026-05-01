@@ -132,19 +132,6 @@ class AlertEngine:
                 self._session_start = m.timestamp
                 self._idle_start = None
 
-            if self._session_start:
-                duration = (m.timestamp - self._session_start).total_seconds() / 3600
-                session_limit = self.thresholds.get("session_hours_warning", 3)
-                if duration >= session_limit:
-                    top = m.ai_processes[0]
-                    alerts.append(Alert(
-                        level="info", category="long_session",
-                        title="\u23f0 Long AI Session",
-                        message=f"AI session running for {duration:.1f}h\n"
-                               f"Top: {top['name']} (CPU {top['cpu']}%, MEM {top['mem_mb']}MB)",
-                        emoji="\U0001f7e1", priority=3
-                    ))
-
             if len(self._history) >= 5:
                 recent = list(self._history)[-5:]
                 avg_cpu = sum(h.ai_cpu_total for h in recent) / len(recent)

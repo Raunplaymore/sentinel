@@ -211,24 +211,6 @@ class TestNetworkAlerts:
 
 class TestSessionAlerts:
 
-    def test_long_session_alert(self):
-        engine = AlertEngine(DEFAULT_CONFIG)
-        now = datetime.now()
-        ai_procs = [{"pid": 1, "name": "ollama", "cpu": 50.0, "mem_mb": 1000}]
-
-        # First call starts session
-        m1 = make_metrics(timestamp=now, ai_processes=ai_procs, ai_cpu_total=50.0)
-        engine.evaluate(m1)
-
-        # 4 hours later
-        m2 = make_metrics(
-            timestamp=now + timedelta(hours=4),
-            ai_processes=ai_procs,
-            ai_cpu_total=50.0,
-        )
-        alerts = engine.evaluate(m2)
-        assert any(a.category == "long_session" for a in alerts)
-
     def test_session_end_alert(self):
         engine = AlertEngine(DEFAULT_CONFIG)
         now = datetime.now()

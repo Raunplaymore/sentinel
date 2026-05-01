@@ -48,7 +48,6 @@ DEFAULT_CONFIG = {
         "temp_critical": 95,
         "memory_critical": 90,
         "network_spike_mb": 100,
-        "session_hours_warning": 3,
         "disk_critical": 90,
     }
 }
@@ -118,7 +117,6 @@ def _validate_config(config: dict) -> dict:
         "memory_critical": (50, 99),
         "disk_critical": (50, 99),
         "network_spike_mb": (1, 10000),
-        "session_hours_warning": (1, 72),
     }
     thresholds = config.get("thresholds", {})
     if not isinstance(thresholds, dict):
@@ -757,7 +755,6 @@ thresholds:
   memory_critical: 90
   disk_critical: 90
   network_spike_mb: 100
-  session_hours_warning: 3
 """
             config_file.write_text(config_content)
             print(f"Config created: {config_file}")

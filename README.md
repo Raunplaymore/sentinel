@@ -373,7 +373,6 @@ thresholds:
   memory_critical: 90 # %
   disk_critical: 90 # %
   network_spike_mb: 100 # MB per interval
-  session_hours_warning: 3 # hours
 
 # AI Security Layer
 security:

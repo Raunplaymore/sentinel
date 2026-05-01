@@ -49,9 +49,6 @@ thresholds:
   # Network
   network_spike_mb: 100        # MB per check interval
 
-  # Session
-  session_hours_warning: 3     # Alert after N hours of continuous AI session
-
 # ── AI Security Layer ──
 security:
   enabled: true
