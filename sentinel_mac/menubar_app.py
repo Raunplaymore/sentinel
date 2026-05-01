@@ -7,6 +7,9 @@ NOT acquire the daemon PID lock — intentionally so it can run alongside
 the LaunchAgent daemon during the PoC. The daemon keeps doing the
 "alert delivery" job; the menubar app is a read-only viewer for now.
 
+Settings toggles round-trip the on-disk config.yaml via ruamel.yaml so
+hand-written comments and layout survive `Save`.
+
 Run with `sentinel-app` after `pip install -e '.[app]'`.
 """
 
@@ -23,12 +26,18 @@ from pathlib import Path
 from typing import IO, Any, Optional
 
 import rumps
-import yaml
+from ruamel.yaml import YAML
 
 from sentinel_mac.collectors.system import MacOSCollector
 from sentinel_mac.core import load_config, resolve_config_path, resolve_data_dir
 from sentinel_mac.engine import AlertEngine
 from sentinel_mac.models import Alert, SystemMetrics
+
+# Round-trip YAML preserves comments, blank lines, key order, and quoting
+# style across load → mutate → dump, so toggling a Settings switch from the
+# menubar leaves the user's hand-written config.yaml comments intact.
+_yaml_rt = YAML(typ="rt")
+_yaml_rt.preserve_quotes = True
 
 POLL_SECONDS = 5
 ALERT_HISTORY_LIMIT = 5
@@ -177,17 +186,25 @@ def _set_nested(config: dict, path: tuple[str, ...], value: Any) -> None:
     cur[path[-1]] = value
 
 
-def _save_config(config_path: Path, config: dict) -> None:
-    """Atomically write config to disk. Comments are NOT preserved (pyyaml)."""
+def _persist_setting(config_path: Path, path: tuple[str, ...], value: Any) -> None:
+    """Round-trip the on-disk config.yaml: load with comments preserved, set
+    one nested key, write back atomically. Existing user comments and layout
+    are kept intact.
+
+    If the file is missing or unreadable, a fresh minimal mapping is written.
+    """
+    if config_path.exists():
+        with open(config_path) as f:
+            doc = _yaml_rt.load(f)
+        if doc is None:  # empty file
+            doc = {}
+    else:
+        doc = {}
+    _set_nested(doc, path, value)
+
     tmp = config_path.with_suffix(config_path.suffix + ".tmp")
     with open(tmp, "w") as f:
-        yaml.safe_dump(
-            config,
-            f,
-            default_flow_style=False,
-            sort_keys=False,
-            allow_unicode=True,
-        )
+        _yaml_rt.dump(doc, f)
     tmp.replace(config_path)
 
 
@@ -221,7 +238,6 @@ class SentinelApp(rumps.App):
         self._last_metrics: Optional[SystemMetrics] = None
         self._alert_history: list[tuple[datetime, Alert]] = []
         self._rule_items: dict[str, rumps.MenuItem] = {}
-        self._comment_loss_acknowledged = False
 
         self._cpu_item = rumps.MenuItem("CPU: —")
         self._mem_item = rumps.MenuItem("MEM: —")
@@ -390,19 +406,10 @@ class SentinelApp(rumps.App):
             )
             return
 
-        if not self._comment_loss_acknowledged and self._config_path.exists():
-            self._comment_loss_acknowledged = True
-            rumps.alert(
-                "Heads up",
-                "Saving from the menubar will rewrite config.yaml without "
-                "comments (PoC limitation). Your settings are preserved; "
-                "only YAML comments are lost.",
-            )
-
         try:
-            _save_config(self._config_path, self._config)
+            _persist_setting(self._config_path, rule["config_path"], new_value)
         except Exception as exc:
-            logging.exception("save_config failed")
+            logging.exception("persist_setting failed")
             rumps.alert("Could not save config", str(exc))
             return
 
