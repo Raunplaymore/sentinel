@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- HostContext API frozen for v0.6 context-aware detection
+  (`sentinel_mac/collectors/context.py` skeleton). Opt-in, default OFF.
+  4-level `TrustLevel`: UNKNOWN / LEARNED / KNOWN / BLOCKED. Negative
+  override via config `blocklist:`. Implementation lands in a follow-up
+  PR; signatures are frozen by [ADR 0001](docs/decisions/0001-host-context.md).
+- ADR (Architecture Decision Records) directory at `docs/decisions/`.
+  ADR 0001 captures v0.6 host-context decisions (Q1–Q5: 4-level enum,
+  flush schedule, CLI deferral to v0.7, SSH/SCP-only scope, download
+  tracking moved to v0.7).
+
+### Deferred
+- `sentinel context forget|block|list|status` CLI — moved to v0.7
+  (see ADR 0001 D3).
+- Download tracking (`curl -o`, `wget`, `git clone` source-URL ↔ output-path
+  pairing) — moved to v0.7 as a side-track of the `--report` filter
+  expansion (see ADR 0001 D5).
+
 ## [0.5.3] - 2026-04-30
 
 ### Added
