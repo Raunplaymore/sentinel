@@ -1,11 +1,19 @@
-"""Sentinel — Menubar App (PoC).
+"""Sentinel — Menubar App.
 
-Standalone macOS menubar app that visualizes Sentinel metrics live.
+macOS menubar app that visualizes Sentinel metrics live and can also act
+as the Sentinel daemon when launched standalone.
 
-Reuses MacOSCollector + AlertEngine. Does NOT send notifications and does
-NOT acquire the daemon PID lock — intentionally so it can run alongside
-the LaunchAgent daemon during the PoC. The daemon keeps doing the
-"alert delivery" job; the menubar app is a read-only viewer for now.
+On startup the app tries to acquire the global daemon flock at
+~/.local/share/sentinel/sentinel.lock:
+
+* Acquired → "active" mode: the app spins the full Sentinel daemon
+  (collectors + notifier + security collectors) in a background thread,
+  so notifications and security event handling come from the menubar
+  process. No LaunchAgent needed.
+* Held by someone else → "viewer" mode: the LaunchAgent (or another
+  sentinel-app) is the daemon. The menubar polls metrics for display
+  only and lets the existing daemon handle alert delivery, avoiding
+  duplicate notifications.
 
 Settings toggles round-trip the on-disk config.yaml via ruamel.yaml so
 hand-written comments and layout survive `Save`.
@@ -21,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import IO, Any, Optional
@@ -29,7 +38,13 @@ import rumps
 from ruamel.yaml import YAML
 
 from sentinel_mac.collectors.system import MacOSCollector
-from sentinel_mac.core import load_config, resolve_config_path, resolve_data_dir
+from sentinel_mac.core import (
+    Sentinel,
+    load_config,
+    resolve_config_path,
+    resolve_data_dir,
+    try_acquire_daemon_lock,
+)
 from sentinel_mac.engine import AlertEngine
 from sentinel_mac.models import Alert, SystemMetrics
 
@@ -264,6 +279,14 @@ class SentinelApp(rumps.App):
         self._alert_history: list[tuple[datetime, Alert]] = []
         self._rule_items: dict[str, rumps.MenuItem] = {}
 
+        # Try to take over the Sentinel daemon role. If the LaunchAgent (or
+        # another sentinel-app) already holds the lock, fall through to
+        # viewer-only mode.
+        self._daemon: Optional[Sentinel] = None
+        self._daemon_thread: Optional[threading.Thread] = None
+        self._daemon_status: str = "viewer"  # "active" | "viewer" | "error"
+        self._start_embedded_daemon()
+
         self._cpu_item = rumps.MenuItem("CPU: —")
         self._mem_item = rumps.MenuItem("MEM: —")
         self._disk_item = rumps.MenuItem("DISK: —")
@@ -290,7 +313,7 @@ class SentinelApp(rumps.App):
             f"All entries · last {LOG_WINDOW_HOURS}h",
             callback=self._on_open_all_log,
         ))
-        self._quit_item = rumps.MenuItem("Quit Sentinel", callback=rumps.quit_application)
+        self._quit_item = rumps.MenuItem("Quit Sentinel", callback=self._on_quit)
 
         self.menu = [
             self._cpu_item,
@@ -316,6 +339,60 @@ class SentinelApp(rumps.App):
 
         self._refresh()
 
+    def _start_embedded_daemon(self) -> None:
+        """Acquire the daemon lock and start Sentinel in a background thread.
+
+        On contention (LaunchAgent already running), stays in viewer mode.
+        On any unexpected failure, also degrades to viewer — never crashes
+        the menubar.
+        """
+        lock = try_acquire_daemon_lock()
+        if lock is None:
+            logging.info(
+                "daemon lock held externally — running in viewer mode"
+            )
+            return
+
+        try:
+            self._daemon = Sentinel(
+                config_path=str(self._config_path) if self._config_path else None,
+                acquire_lock=False,
+                install_signal_handlers=False,
+            )
+            self._daemon.adopt_lock(lock)
+            self._daemon_thread = threading.Thread(
+                target=self._daemon.run,
+                name="sentinel-daemon",
+                daemon=True,
+            )
+            self._daemon_thread.start()
+            self._daemon_status = "active"
+            logging.info("daemon role adopted by menubar app")
+        except Exception:
+            logging.exception("failed to start embedded daemon")
+            self._daemon = None
+            self._daemon_thread = None
+            self._daemon_status = "error"
+            try:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                lock.close()
+            except Exception:
+                pass
+
+    def _stop_embedded_daemon(self) -> None:
+        if self._daemon is None:
+            return
+        try:
+            self._daemon.stop()
+        except Exception:
+            logging.exception("daemon stop failed")
+        if self._daemon_thread is not None and self._daemon_thread.is_alive():
+            self._daemon_thread.join(timeout=5)
+
+    def _on_quit(self, _sender) -> None:
+        self._stop_embedded_daemon()
+        rumps.quit_application()
+
     def _build_settings_menu(self) -> rumps.MenuItem:
         rules_submenu = rumps.MenuItem("Detection Rules")
 
@@ -340,12 +417,23 @@ class SentinelApp(rumps.App):
         )
 
         settings = rumps.MenuItem("Settings")
+        settings.add(self._build_daemon_status_item())
+        settings.add(None)
         settings.add(rules_submenu)
         if self._config_path:
             settings.add(
                 rumps.MenuItem("Open config.yaml", callback=self._on_open_config)
             )
         return settings
+
+    def _build_daemon_status_item(self) -> rumps.MenuItem:
+        if self._daemon_status == "active":
+            label = "Daemon: 🟢 active (this app)"
+        elif self._daemon_status == "error":
+            label = "Daemon: 🔴 failed to start (check log)"
+        else:
+            label = "Daemon: ⚪ external (LaunchAgent or other)"
+        return rumps.MenuItem(label)
 
     def _make_rule_item(self, rule: dict) -> rumps.MenuItem:
         item = rumps.MenuItem(rule["title"], callback=self._on_toggle_rule)
