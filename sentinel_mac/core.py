@@ -175,18 +175,60 @@ def load_config(config_path: Path = None) -> dict:
 
 
 # ─────────────────────────────────────────────
+# Daemon lock helpers (shared with the menubar app)
+# ─────────────────────────────────────────────
+
+
+def daemon_lock_path() -> Path:
+    """Fixed path so two daemons started from different cwds find each other."""
+    lock_dir = Path.home() / ".local" / "share" / "sentinel"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    return lock_dir / "sentinel.lock"
+
+
+def try_acquire_daemon_lock():
+    """Try to grab the exclusive daemon flock.
+
+    Returns the open file handle on success (caller must keep the reference
+    alive — losing it releases the lock) or None if another process holds it.
+    """
+    fp = open(daemon_lock_path(), "w")
+    try:
+        fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fp.close()
+        return None
+    fp.write(str(os.getpid()))
+    fp.flush()
+    return fp
+
+
+# ─────────────────────────────────────────────
 # Main Daemon
 # ─────────────────────────────────────────────
 
 class Sentinel:
     """Main monitoring daemon."""
 
-    def __init__(self, config_path: str = None):
+    def __init__(
+        self,
+        config_path: str = None,
+        *,
+        acquire_lock: bool = True,
+        install_signal_handlers: bool = True,
+    ):
+        """Initialize the daemon.
+
+        acquire_lock=False / install_signal_handlers=False let an embedding
+        process (the menubar app) own the daemon lock and shutdown lifecycle
+        instead of having Sentinel grab them via sys.exit / signal handlers.
+        """
         # Prevent duplicate instances via PID file lock
         self._pid_file = None
         self._data_dir = resolve_data_dir()
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        self._acquire_lock()
+        if acquire_lock:
+            self._acquire_lock()
 
         resolved = resolve_config_path(config_path)
         self.config = load_config(resolved)
@@ -236,27 +278,36 @@ class Sentinel:
         self._last_status = datetime.min
         self._running = True
 
-        signal.signal(signal.SIGTERM, self._shutdown)
-        signal.signal(signal.SIGINT, self._shutdown)
+        if install_signal_handlers:
+            signal.signal(signal.SIGTERM, self._shutdown)
+            signal.signal(signal.SIGINT, self._shutdown)
+
+    def stop(self) -> None:
+        """External shutdown trigger for embedded mode (menubar app).
+
+        Idempotent. Releases security collectors, the event log, and the
+        PID lock if held — the same cleanup the SIGTERM handler does, minus
+        the signal-handler signature.
+        """
+        self._shutdown(None, None)
 
     def _acquire_lock(self):
-        """Prevent duplicate daemon instances using a file lock.
-
-        Always uses a fixed path (~/.local/share/sentinel/) regardless of
-        working directory, so that two instances started from different
-        locations still detect each other.
-        """
-        global_lock_dir = Path.home() / ".local" / "share" / "sentinel"
-        global_lock_dir.mkdir(parents=True, exist_ok=True)
-        lock_file = global_lock_dir / "sentinel.lock"
-        self._pid_file = open(lock_file, "w")
-        try:
-            fcntl.flock(self._pid_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self._pid_file.write(str(os.getpid()))
-            self._pid_file.flush()
-        except OSError:
+        """Acquire the global daemon lock; print + sys.exit on contention."""
+        fp = try_acquire_daemon_lock()
+        if fp is None:
+            lock_file = daemon_lock_path()
             print(f"ERROR: Sentinel is already running. Lock file: {lock_file}")
             sys.exit(1)
+        self._pid_file = fp
+
+    def adopt_lock(self, fp) -> None:
+        """Install a lock handle acquired externally (by the menubar app).
+
+        Used in embedded mode where the menubar tries to grab the daemon lock
+        before instantiating Sentinel(acquire_lock=False); on success, the
+        same handle is handed off here so _shutdown can release it cleanly.
+        """
+        self._pid_file = fp
 
     def _shutdown(self, signum, frame):
         logging.info("\U0001f6d1 Sentinel shutting down...")
