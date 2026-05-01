@@ -38,7 +38,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
-app = ["rumps>=0.4.0,<1"]
+app = ["rumps>=0.4.0,<1", "ruamel.yaml>=0.18,<1"]
 
 [project.urls]
 Homepage = "https://github.com/raunplaymore/sentinel"
