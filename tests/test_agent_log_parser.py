@@ -5,6 +5,7 @@ import queue
 import tempfile
 import pytest
 from datetime import datetime
+from typing import Optional
 from unittest.mock import patch
 
 from sentinel_mac.collectors.agent_log_parser import AgentLogParser, HIGH_RISK_PATTERNS, MCP_INJECTION_PATTERNS
@@ -589,7 +590,7 @@ class TestMCPInjectionAlerts:
 class TestSubRuleGating:
     """Per-rule toggles under security.agent_logs.rules."""
 
-    def _make_parser(self, rules: dict | None = None):
+    def _make_parser(self, rules: Optional[dict] = None):
         config = {
             "security": {
                 "agent_logs": {
