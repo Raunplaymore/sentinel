@@ -779,3 +779,274 @@ class TestCliStdoutMessages:
         # Old "Restart the daemon" notice stayed gone (CHANGELOG v0.8 Track 1a).
         assert "Restart the daemon" not in captured.out
         assert "Restart the daemon" not in captured.err
+
+
+# ── 10. read-side reload lock instrumentation (Track 1c) ──────────
+
+
+class TestReloadLockReadSide:
+    """ADR 0005 §D5 read-side instrumentation — closes PR #16 inline TODO.
+
+    Track 1a frozen the swap-side lock; Track 1c adds the matching
+    read-side ``_snapshot_for_main_loop()`` calls in the main loop and
+    the queue drainer so a SIGHUP-driven reload landing mid-cycle cannot
+    surface partially-swapped state.
+    """
+
+    def test_snapshot_returns_four_tuple_of_live_refs(
+        self, tmp_path, isolated_home
+    ):
+        """Snapshot returns the exact 4-tuple shape D5 specifies."""
+        cfg = _quiet_config(tmp_path)
+        s = _make_sentinel(cfg)
+        try:
+            snap = s._snapshot_for_main_loop()
+            assert isinstance(snap, tuple)
+            assert len(snap) == 4
+            engine, host_ctx, event_logger, security_rules = snap
+            assert engine is s.engine
+            assert host_ctx is s.host_ctx
+            assert event_logger is s._event_logger
+            assert security_rules is s._security_rules
+        finally:
+            _stop_sentinel(s)
+
+    def test_snapshot_takes_reload_lock(
+        self, tmp_path, isolated_home, monkeypatch
+    ):
+        """`_snapshot_for_main_loop` enters and exits ``_reload_lock`` exactly once.
+
+        Wraps the real RLock so we can count enter/exit transitions
+        without breaking lock semantics. RLock is reentrant, so the
+        worker thread's own acquisitions during shutdown still succeed.
+        """
+        cfg = _quiet_config(tmp_path)
+        s = _make_sentinel(cfg)
+        try:
+            real_lock = s._reload_lock
+            enters: list[float] = []
+            exits: list[float] = []
+
+            class _CountingLock:
+                def __enter__(self_inner):
+                    enters.append(time.monotonic())
+                    return real_lock.__enter__()
+
+                def __exit__(self_inner, exc_type, exc, tb):
+                    exits.append(time.monotonic())
+                    return real_lock.__exit__(exc_type, exc, tb)
+
+                # Forward acquire/release for any code path that uses
+                # the lock directly (none in the read side, but defensive).
+                def acquire(self_inner, *a, **kw):
+                    return real_lock.acquire(*a, **kw)
+
+                def release(self_inner):
+                    return real_lock.release()
+
+            s._reload_lock = _CountingLock()  # type: ignore[assignment]
+
+            snap_before = len(enters)
+            s._snapshot_for_main_loop()
+            assert len(enters) == snap_before + 1
+            assert len(exits) == snap_before + 1
+
+            # A second call increments by exactly one — single
+            # acquire/release per snapshot, no leaks.
+            s._snapshot_for_main_loop()
+            assert len(enters) == snap_before + 2
+            assert len(exits) == snap_before + 2
+
+            # Restore so _stop_sentinel sees the real lock.
+            s._reload_lock = real_lock
+        finally:
+            _stop_sentinel(s)
+
+    def test_snapshot_is_consistent_against_concurrent_reload(
+        self, tmp_path, isolated_home, monkeypatch
+    ):
+        """Concurrent ``_do_reload`` cannot interleave a partial swap into a snapshot.
+
+        Strategy: monkey-patch ``_do_reload`` with a synthetic swap that
+        increments a generation counter and tags **every one** of the
+        four reload-managed attributes with the same generation. Run a
+        snapshot thread concurrently with the reload thread; assert that
+        every captured 4-tuple has all four members from the same
+        generation. Without the read-side lock, the snapshot would
+        eventually capture e.g. engine=gen N + event_logger=gen N+1 (a
+        torn read); with the lock the invariant always holds.
+
+        We avoid invoking the real ``_do_reload`` because its file I/O
+        and validation steps dwarf the contended swap window, masking
+        the race the test is meant to expose.
+        """
+        cfg = _quiet_config(tmp_path)
+        s = _make_sentinel(cfg)
+        try:
+            # Each "generation" is a tiny tagged sentinel object whose
+            # only attribute is .gen. We swap all four refs to fresh
+            # tagged objects under the same lock that the production
+            # _do_reload uses, so the read-side lock contract is the
+            # only thing standing between snapshot and a torn tuple.
+            class _Tagged:
+                __slots__ = ("gen",)
+
+                def __init__(self, gen: int):
+                    self.gen = gen
+
+            generations: list[int] = [0]
+
+            def _swap_all(gen: int) -> None:
+                with s._reload_lock:
+                    s.engine = _Tagged(gen)        # type: ignore[assignment]
+                    s.host_ctx = _Tagged(gen)      # type: ignore[assignment]
+                    s._event_logger = _Tagged(gen)  # type: ignore[assignment]
+                    s._security_rules = _Tagged(gen)  # type: ignore[assignment]
+
+            # Seed gen 0.
+            _swap_all(0)
+
+            stop = threading.Event()
+            torn: list[tuple] = []
+
+            def _reload_loop():
+                while not stop.is_set():
+                    generations[0] += 1
+                    _swap_all(generations[0])
+                    # No sleep — we want maximum contention pressure.
+
+            def _snapshot_loop():
+                while not stop.is_set():
+                    engine, host_ctx, event_logger, security_rules = (
+                        s._snapshot_for_main_loop()
+                    )
+                    gens = {
+                        engine.gen,
+                        host_ctx.gen,
+                        event_logger.gen,
+                        security_rules.gen,
+                    }
+                    if len(gens) != 1:
+                        # All four refs must come from the same swap
+                        # generation. A set of size > 1 proves a torn
+                        # read leaked through — i.e., the lock is not
+                        # serialising the snapshot against the swap.
+                        torn.append(tuple(gens))
+
+            t_reload = threading.Thread(target=_reload_loop)
+            t_snap1 = threading.Thread(target=_snapshot_loop)
+            t_snap2 = threading.Thread(target=_snapshot_loop)
+            t_reload.start()
+            t_snap1.start()
+            t_snap2.start()
+
+            # 200ms is plenty: the synthetic swap is sub-µs so we expect
+            # tens of thousands of iterations on each thread, which would
+            # surface a torn read with overwhelming probability if the
+            # read side were not lock-serialised.
+            time.sleep(0.2)
+            stop.set()
+            t_reload.join(timeout=2.0)
+            t_snap1.join(timeout=2.0)
+            t_snap2.join(timeout=2.0)
+
+            assert not t_reload.is_alive(), "reload loop did not stop"
+            assert not t_snap1.is_alive(), "snapshot loop 1 did not stop"
+            assert not t_snap2.is_alive(), "snapshot loop 2 did not stop"
+            assert torn == [], (
+                f"detected {len(torn)} torn snapshot tuple(s): {torn[:3]}"
+            )
+            # Sanity: the race actually ran. With a sub-µs swap the
+            # reload thread should turn over thousands of generations
+            # in 200ms; pick a conservative floor that survives the
+            # slowest CI hardware.
+            assert generations[0] >= 50, (
+                f"reload loop only completed {generations[0]} swaps — "
+                "race probably did not exercise the lock"
+            )
+        finally:
+            # Restore the real attributes so _stop_sentinel can do its
+            # cleanup without tripping over our _Tagged stand-ins.
+            # _shutdown calls host_ctx.flush() and _event_logger.close()
+            # which are not present on _Tagged — replace with no-ops.
+            class _Noop:
+                def flush(self):
+                    pass
+
+                def close(self):
+                    pass
+
+                def stop(self):
+                    pass
+
+            s.host_ctx = _Noop()  # type: ignore[assignment]
+            s._event_logger = _Noop()  # type: ignore[assignment]
+            _stop_sentinel(s)
+
+    def test_reload_blocks_on_in_flight_snapshot(
+        self, tmp_path, isolated_home, monkeypatch
+    ):
+        """A ``_do_reload`` swap waits for an in-flight snapshot to release the lock.
+
+        Thread A enters ``_snapshot_for_main_loop`` and stalls inside
+        the ``with`` block (simulated by a slow ``__enter__`` chain).
+        Thread B calls ``_do_reload``. The reload's swap step (which
+        also acquires ``_reload_lock``) must not complete until thread
+        A releases.
+        """
+        cfg = _quiet_config(tmp_path)
+        s = _make_sentinel(cfg)
+        try:
+            old_event_logger = s._event_logger
+            release_snapshot = threading.Event()
+            snapshot_acquired = threading.Event()
+
+            def _holding_snapshot():
+                with s._reload_lock:
+                    snapshot_acquired.set()
+                    # Hold the lock until the test releases us.
+                    release_snapshot.wait(timeout=2.0)
+
+            t_hold = threading.Thread(target=_holding_snapshot)
+            t_hold.start()
+            assert snapshot_acquired.wait(timeout=1.0), (
+                "snapshot thread never acquired the lock"
+            )
+
+            # Kick off a reload from another thread. It must block on
+            # the swap step until we release.
+            reload_done = threading.Event()
+
+            def _reload_in_thread():
+                try:
+                    s._do_reload()
+                finally:
+                    reload_done.set()
+
+            t_reload = threading.Thread(target=_reload_in_thread)
+            t_reload.start()
+
+            # Reload must NOT have completed yet — verify it is still
+            # blocked (the swap mutates `_event_logger` so this is
+            # detectable). Give it 100ms to prove it is genuinely waiting.
+            time.sleep(0.1)
+            assert not reload_done.is_set(), (
+                "reload completed while a snapshot held the lock — "
+                "swap-side serialization is broken"
+            )
+            assert s._event_logger is old_event_logger, (
+                "event_logger was swapped while snapshot held the lock"
+            )
+
+            # Release the snapshot; reload should now finish promptly.
+            release_snapshot.set()
+            t_hold.join(timeout=2.0)
+            assert reload_done.wait(timeout=2.0), (
+                "reload did not complete within 2s of snapshot release"
+            )
+            t_reload.join(timeout=2.0)
+
+            # Post-release: event_logger was swapped (proves reload ran).
+            assert s._event_logger is not old_event_logger
+        finally:
+            _stop_sentinel(s)

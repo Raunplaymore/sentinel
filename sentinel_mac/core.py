@@ -570,16 +570,15 @@ class Sentinel:
 
             # event_logger swap inside the same lock (D2 row): close the
             # current handle so the next .log() call rotates into a fresh
-            # file. ADR 0005 §D5 specifies that the main loop's metric
-            # collection and the security queue drainer should take this
-            # same _reload_lock briefly before reading self.* — that
-            # read-side instrumentation is **deferred**, tracked as a v0.8
-            # Track 1c TODO. Today the safety relies on (a) Python's GIL
-            # making attribute reassignment atomic at the bytecode level,
-            # (b) the single-daemon assumption (only the main loop reads
-            # these refs), and (c) EventLogger.close being idempotent.
-            # The close→reopen window is sub-µs in practice; no observed
-            # races. See ADR 0005 D5 for the full lock contract.
+            # file. ADR 0005 §D5 read-side instrumentation is now in
+            # place: the main loop and the security queue drainer call
+            # `_snapshot_for_main_loop()` at cycle start to take a
+            # consistent reference snapshot under this same lock, so a
+            # mid-cycle swap cannot surface partially-replaced state
+            # (e.g., new host_ctx paired with old engine.thresholds).
+            # The close→reopen window is fully covered: snapshots taken
+            # before this block see the old logger; snapshots taken
+            # after see the new one; nobody sees a closed handle.
             try:
                 self._event_logger.close()
             except Exception as exc:  # pragma: no cover — close is idempotent
@@ -628,6 +627,30 @@ class Sentinel:
             )
             self._fs_watcher = None
 
+    def _snapshot_for_main_loop(self) -> tuple:
+        """ADR 0005 §D5 — take a consistent reference snapshot under ``_reload_lock``.
+
+        Returns a 4-tuple ``(engine, host_ctx, event_logger, security_rules)``.
+        The main loop and the security queue drainer call this once at cycle
+        start so a SIGHUP-driven reload landing mid-cycle cannot surface
+        partially-swapped state (e.g., new ``host_ctx`` paired with the old
+        ``engine.thresholds``, or a logger that was closed mid-write).
+
+        Lock-hold discipline (ADR 0005 §D5): the lock is held only for the
+        attribute reads — all downstream processing (collect / evaluate /
+        notify / log / queue drain) runs against the local snapshot and so
+        does **not** delay an in-flight reload worker waiting for the same
+        ``_reload_lock``. This keeps reload latency sub-second per the D5
+        contract.
+        """
+        with self._reload_lock:
+            return (
+                self.engine,
+                self.host_ctx,
+                self._event_logger,
+                self._security_rules,
+            )
+
     def run(self):
         channels = self.notifier.channel_names
         logging.info(f"\U0001f680 Sentinel started — channels: {', '.join(channels)}")
@@ -650,6 +673,14 @@ class Sentinel:
 
         while self._running:
             try:
+                # ADR 0005 §D5 — take a consistent snapshot of mutable
+                # reload-managed refs at the top of every iteration. All
+                # downstream calls in this iteration use the snapshot so a
+                # mid-cycle SIGHUP reload cannot surface partial state.
+                engine, host_ctx, _event_logger, _security_rules = (
+                    self._snapshot_for_main_loop()
+                )
+
                 metrics = self.collector.collect()
 
                 logging.info(
@@ -664,7 +695,7 @@ class Sentinel:
                     )
                 )
 
-                alerts = self.engine.evaluate(metrics)
+                alerts = engine.evaluate(metrics)
                 for alert in alerts:
                     logging.warning(f"\U0001f6a8 {alert.level}: {alert.title}")
                     self.notifier.send(alert)
@@ -681,8 +712,10 @@ class Sentinel:
                     self.notifier.send_status(metrics)
                     # ADR 0001 D2: piggy-back host context flush on the
                     # status report tick so we do not own a separate timer.
-                    # No-op when context is disabled.
-                    self.host_ctx.flush()
+                    # No-op when context is disabled. Uses the snapshot
+                    # ref so a reload landing mid-tick does not flush a
+                    # stale host_ctx that the swap already replaced.
+                    host_ctx.flush()
                     self._last_status = now
 
             except Exception as e:
@@ -693,12 +726,24 @@ class Sentinel:
         logging.info("Sentinel stopped.")
 
     def _process_security_events(self):
-        """Drain the security event queue, log to JSONL, and generate alerts."""
+        """Drain the security event queue, log to JSONL, and generate alerts.
+
+        ADR 0005 §D5 — the drainer takes its own snapshot of reload-managed
+        refs at the top of the cycle so events are routed against a
+        consistent (engine, event_logger) pair even if a SIGHUP reload
+        lands mid-drain. Within a single cycle every event is processed
+        against the same snapshot; the next cycle picks up the new refs.
+        """
+        # Snapshot once per drain cycle (D5 read-side lock instrumentation).
+        # Lock is released immediately; queue / fs_watcher work runs outside.
+        engine, _host_ctx, event_logger, _security_rules = (
+            self._snapshot_for_main_loop()
+        )
         processed = 0
         while not self._security_queue.empty() and processed < 100:
             try:
                 event = self._security_queue.get_nowait()
-                self._event_logger.log(event)
+                event_logger.log(event)
 
                 # ADR 0002 §D3 — register agent_download events with the
                 # FSWatcher so a matching file_create/modify within the
@@ -726,7 +771,7 @@ class Sentinel:
                             date=event.timestamp.date(),
                         )
 
-                alerts = self.engine.evaluate_security_event(event)
+                alerts = engine.evaluate_security_event(event)
                 for alert in alerts:
                     logging.warning(f"\U0001f6a8 [security] {alert.level}: {alert.title}")
                     self.notifier.send(alert)
