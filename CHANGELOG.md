@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (v0.8 freeze)
+- ADR 0005 — Daemon Reload Protocol. Freezes the SIGHUP-driven reload
+  contract: which sources reload (config / known_hosts / host_context),
+  which in-memory state survives (cooldowns / rate-limits / log offsets),
+  the atomic-or-nothing failure mode, multi-SIGHUP coalescing, and the
+  CLI integration that auto-signals the daemon after `sentinel context`
+  mutations. Implementation in v0.8 Track 1.
+- ADR 0006 — Config Mutation Fallback. Lifts ADR 0003 §D2's hard
+  ruamel requirement: `sentinel context block` / `unblock` now falls
+  back to PyYAML automatically when ruamel is missing, with a
+  backup-then-write safety net, single-line stderr warning, and
+  uniform `--json` envelope additions (`yaml_backend`, `backup_path`,
+  `comment_preservation`). Supersedes ADR 0003 §D6 exit code 3 for
+  the ruamel-missing case. Implementation in v0.8 Track 1.
+
 ### Added (v0.7 freeze)
 - ADR 0002 — Agent Download Tracking. Freezes the new
   `agent_download` SecurityEvent type, detail schema, FSWatcher join
