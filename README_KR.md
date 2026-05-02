@@ -87,15 +87,25 @@ sentinel --report --json --since 30d > events.json    # versioned envelope (ADR 
 sentinel context status                # 전체 스냅샷 (frequency + blocklist + known_hosts)
 sentinel context status api.x.io       # 단일 호스트 상세 (trust level, count)
 sentinel context forget evil.com       # frequency counter에서 제거
-sentinel context block   evil.com      # config blocklist에 추가 ([app] extra 필요)
+sentinel context block   evil.com      # config blocklist에 추가 ([app] extra 없으면 PyYAML 폴백)
 sentinel context unblock evil.com      # blocklist에서 제거
 sentinel context status --json         # ADR 0004 envelope JSON 출력
+
+# 헬스체크 (v0.8 Track 1b, ADR 0006)
+sentinel doctor             # 일회성 헬스체크 (daemon, config, 권한, hook, cache, backup)
+sentinel doctor --json      # 기계 판독 가능한 envelope (kind=health_check)
 
 sentinel logs              # 실시간 로그 보기
 sentinel --test-notify     # 모든 채널에 테스트 알림 전송
 sentinel --version         # 버전 확인
 sentinel --help            # 전체 옵션
 ```
+
+> `block` / `unblock`은 `config.yaml`을 직접 수정합니다. `[app]` extra의
+> `ruamel.yaml`이 설치돼 있으면 사용자 주석과 키 순서가 보존됩니다.
+> extra가 없으면 PyYAML 폴백 경로로 자동 진입(ADR 0006): 같은 디렉토리에
+> `config.yaml.bak.<epoch>` 백업이 생성되고 stderr에 한 줄 경고가 표시됩니다.
+> 어느 경로든 mutation은 성공하며, 실행 중인 daemon은 SIGHUP으로 변경을 자동 인식합니다.
 
 ### 옵션 3 — pip 설치 (미니멀, launchd plist 수동 작성)
 

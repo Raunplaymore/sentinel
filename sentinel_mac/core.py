@@ -1341,6 +1341,12 @@ def main():
     if len(sys.argv) >= 2 and sys.argv[1] == "context":
         from sentinel_mac.commands.context import dispatch as _context_dispatch
         sys.exit(_context_dispatch(sys.argv[2:]))
+    # v0.8 Track 1b — `sentinel doctor` health-check command. Same
+    # dispatch shape as `context` above; owns its own argparse
+    # subparser inside commands/doctor.py.
+    if len(sys.argv) >= 2 and sys.argv[1] == "doctor":
+        from sentinel_mac.commands.doctor import dispatch as _doctor_dispatch
+        sys.exit(_doctor_dispatch(sys.argv[2:]))
 
     parser = argparse.ArgumentParser(
         description="Sentinel — AI Agent Security Guardian for macOS",
@@ -1359,7 +1365,10 @@ def main():
                "  context status [HOST]   Show snapshot or single-host detail\n"
                "  context forget HOST     Remove from frequency counter\n"
                "  context block   HOST    Add to config blocklist\n"
-               "  context unblock HOST    Remove from config blocklist",
+               "  context unblock HOST    Remove from config blocklist\n"
+               "\nHealth check (v0.8 Track 1b):\n"
+               "  doctor                  One-shot health check (text)\n"
+               "  doctor --json           Health snapshot envelope (kind=health_check)",
     )
     parser.add_argument("command", nargs="?", default=None,
                         choices=["start", "stop", "restart", "status", "logs",
