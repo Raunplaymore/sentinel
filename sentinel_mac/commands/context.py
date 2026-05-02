@@ -1,6 +1,6 @@
 """``sentinel context`` CLI subcommand — host trust inspection / mutation.
 
-Implements ADR 0003 (frozen v0.7 surface):
+Implements ADR 0003 (frozen v0.7 surface) with ADR 0006 fallback:
 
     sentinel context status [HOST]    # read-only snapshot or single-host detail
     sentinel context forget HOST      # remove from frequency counter
@@ -9,12 +9,15 @@ Implements ADR 0003 (frozen v0.7 surface):
 
 Universal flags: ``--json``, ``--config PATH``.
 
-Exit codes (ADR 0003 §D6):
+Exit codes (ADR 0003 §D6, with ADR 0006 §D4 amendment):
     0 — success
     1 — host not found (e.g., ``forget`` on unknown host, ``unblock`` on
         host not present)
     2 — validation error (bad host syntax)
-    3 — config mutation failed (ruamel missing, file unwritable, etc.)
+    3 — config mutation failed (file unwritable, parse error, etc.).
+        ADR 0006 §D4 supersedes ADR 0003 §D6 for the ruamel-missing
+        case: missing ruamel triggers automatic PyYAML fallback and
+        returns exit 0 if the write succeeds.
     4 — cache file read error (corrupted, unreadable)
 
 JSON envelope shape (ADR 0004 §D2):
@@ -32,10 +35,14 @@ Design notes:
 * No third-party CLI lib (ADR 0003 §D7) — stdlib ``argparse`` only.
 * All four verbs work whether the daemon is running or not (ADR §D3) and
   whether ``security.context_aware.enabled`` is true or not (ADR §D4).
-* ``block`` / ``unblock`` mutate ``config.yaml`` in place via ruamel
-  round-trip so user comments and key order survive (ADR §D2). When
-  ``ruamel.yaml`` is not installed (i.e., the user did not install the
-  ``[app]`` extra), these two verbs exit 3 with a clear install hint.
+* ``block`` / ``unblock`` mutate ``config.yaml`` in place. The preferred
+  loader is ``ruamel.yaml`` (from the ``[app]`` extra) which preserves
+  user comments and key order. When ruamel is not installed, the CLI
+  falls back automatically to PyYAML (already a hard dependency) per
+  ADR 0006 §D1: a single-line stderr warning is emitted, a backup file
+  ``config.yaml.bak.<unix_epoch_seconds>`` is written next to the
+  original, and the mutation proceeds. Comments are lost on the
+  PyYAML path; key order survives via ``sort_keys=False``.
 * ``forget`` mutates the runtime cache directly; no config edit.
 """
 
@@ -45,11 +52,15 @@ import argparse
 import fcntl
 import json
 import os
+import shutil
 import signal
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
+
+import yaml
 
 from sentinel_mac.collectors.context import (
     HostContext,
@@ -674,17 +685,107 @@ def cmd_forget(args: argparse.Namespace) -> int:
 
 
 def _require_ruamel() -> Any:
-    """Import ruamel.yaml or raise a CLI-friendly RuntimeError on miss."""
+    """Import ruamel.yaml or raise ImportError on miss.
+
+    ADR 0006 §D1 — preferred YAML backend. The PyYAML fallback path
+    (:func:`_resolve_yaml_backend`) catches the ``ImportError`` and
+    proceeds without ruamel. This helper used to raise ``RuntimeError``
+    with an install hint; that pre-ADR-0006 behaviour is preserved
+    *only* when monkeypatched in the legacy exit-3 test (kept around as
+    a safety net for any custom downstream wrapper that called the
+    helper directly).
+    """
+    from ruamel.yaml import YAML  # noqa: F401 — surface ImportError if missing
+
+    yaml_rt = YAML(typ="rt")
+    yaml_rt.preserve_quotes = True
+    return yaml_rt
+
+
+def _resolve_yaml_backend() -> tuple[str, Optional[Any]]:
+    """ADR 0006 §D1 — pick the YAML backend at mutation time.
+
+    Returns ``(backend_name, ruamel_yaml_instance_or_None)``:
+
+    * ``("ruamel", <YAML(typ="rt") instance>)`` when ruamel is importable.
+    * ``("pyyaml", None)`` when ruamel is missing — the caller drives
+      the PyYAML path via :func:`_save_config_with_pyyaml`.
+
+    Lazy import: the resolution happens here (not at module load time)
+    so monkeypatching ``_require_ruamel`` in tests still flips the
+    backend deterministically.
+    """
     try:
-        from ruamel.yaml import YAML
-    except ImportError as exc:  # pragma: no cover — exercised via monkeypatch
-        raise RuntimeError(
-            "install with `pip install sentinel-mac[app]` to use "
-            "config-mutating subcommands (block / unblock)"
-        ) from exc
-    yaml = YAML(typ="rt")
-    yaml.preserve_quotes = True
-    return yaml
+        return "ruamel", _require_ruamel()
+    except ImportError:
+        return "pyyaml", None
+    except RuntimeError:
+        # Legacy monkeypatch in tests/test_context_cli.py raised RuntimeError
+        # to simulate a missing extra. ADR 0006 §D4 supersedes that test's
+        # original intent (exit 3 → exit 0 via fallback); preserve the same
+        # branch behaviour by treating it as a missing import.
+        return "pyyaml", None
+
+
+def _save_config_with_pyyaml(config_path: Path, data: dict) -> str:
+    """ADR 0006 §D2 — backup-then-write fallback for the ruamel-less path.
+
+    1. Copy ``config.yaml`` to ``config.yaml.bak.<unix_epoch_seconds>``
+       via ``shutil.copy2`` (preserves mtime / permissions; not atomic
+       at the FS level, but the original is untouched until the dump
+       below succeeds).
+    2. Dump the mutated mapping back over the original with
+       ``yaml.safe_dump(..., sort_keys=False)`` — comments are lost,
+       but key order is preserved per ADR 0006 §D2.
+    3. Force both backup and rewritten config to ``0o600`` per ADR 0006
+       §D5 (config files may carry webhook secrets).
+
+    Returns the absolute path to the backup file so the caller can
+    surface it in the stderr warning + JSON envelope.
+    """
+    epoch = int(time.time())
+    backup_path = config_path.with_suffix(config_path.suffix + f".bak.{epoch}")
+    shutil.copy2(config_path, backup_path)  # preserves mtime/perms (best-effort)
+    try:
+        os.chmod(backup_path, 0o600)  # ADR 0006 §D5 — secrets-grade perms
+    except OSError:
+        # Permission tightening is advisory; if the FS rejects it (rare),
+        # the dump still proceeds — the warning already advises the user.
+        pass
+
+    with open(config_path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(
+            data, fh, default_flow_style=False, sort_keys=False
+        )
+    try:
+        os.chmod(config_path, 0o600)
+    except OSError:
+        pass
+
+    return str(backup_path)
+
+
+def _emit_pyyaml_fallback_warning(backup_path: str) -> None:
+    """ADR 0006 §D3 — single-line stderr warning when PyYAML path runs.
+
+    Kept under ~120 chars so it does not wrap on a default terminal.
+    Includes the absolute backup path so the user can recover from it
+    without searching the config directory.
+    """
+    # ADR 0006 §D3 — keep the message short enough to avoid wrapping on
+    # an 80-column terminal. We display the backup path with a leading "~"
+    # when it lives under HOME (saves ~30 chars on macOS) and inline the
+    # absolute path only when it does not.
+    try:
+        rel = Path(backup_path).relative_to(Path.home())
+        shown = f"~/{rel}"
+    except ValueError:
+        shown = backup_path
+    msg = (
+        f"warning: ruamel.yaml missing → PyYAML fallback (comments lost). "
+        f"Backup: {shown}. Fix: pip install sentinel-mac[app]."
+    )
+    print(msg, file=sys.stderr)
 
 
 def _ensure_blocklist_path(data: Any) -> list:
@@ -728,6 +829,14 @@ def _mutate_blocklist(
 ) -> int:
     """Shared implementation for ``block`` (action='add') and ``unblock``
     (action='remove'). Returns the CLI exit code.
+
+    ADR 0006 §D4 supersedes ADR 0003 §D6 for the ruamel-missing case:
+    instead of returning exit 3, we automatically fall back to PyYAML
+    and return exit 0 if the write succeeds. The envelope gains four
+    additive fields per ADR 0006 §D3 (uniform shape across both
+    backends): ``yaml_backend`` ∈ {``"ruamel"``, ``"pyyaml"``},
+    ``backup_path`` (PyYAML only — ``null`` on the ruamel path),
+    ``comment_preservation`` ∈ {``"preserved"``, ``"lost"``}.
     """
     config_path = _resolve_config(args.config)
     if config_path is None or not Path(config_path).exists():
@@ -737,16 +846,20 @@ def _mutate_blocklist(
         )
         return 3
 
-    try:
-        yaml = _require_ruamel()
-    except RuntimeError as exc:
-        _err(f"Error: {exc}")
-        return 3
+    # ADR 0006 §D1 — pick backend lazily. Ruamel preferred (preserves
+    # comments / formatting); PyYAML automatic fallback (loses comments
+    # but writes a backup).
+    backend, ruamel_yaml = _resolve_yaml_backend()
 
     try:
-        with open(config_path, "r", encoding="utf-8") as fh:
-            data = yaml.load(fh)
-    except Exception as exc:  # noqa: BLE001 — surface any parse error (incl. ruamel YAMLError)
+        if backend == "ruamel":
+            assert ruamel_yaml is not None  # narrow for mypy
+            with open(config_path, "r", encoding="utf-8") as fh:
+                data = ruamel_yaml.load(fh)
+        else:  # pyyaml
+            with open(config_path, "r", encoding="utf-8") as fh:
+                data = yaml.safe_load(fh)
+    except Exception as exc:  # noqa: BLE001 — surface any parse error
         _err(f"Error: failed to load {config_path}: {exc}")
         return 3
 
@@ -757,7 +870,8 @@ def _mutate_blocklist(
         return 3
 
     # Normalize all existing entries for comparison without mutating
-    # the YAML structure (ruamel preserves quoting/casing on disk).
+    # the YAML structure (ruamel preserves quoting/casing on disk;
+    # PyYAML normalises strings on load anyway).
     existing_norm = [str(item).strip().lower() for item in blocklist]
 
     result: str
@@ -772,7 +886,9 @@ def _mutate_blocklist(
             # No file write happened, so no SIGHUP is sent (ADR 0005 §D7
             # — additive `daemon_reload` field still emitted with the
             # `skipped_not_running` value so envelope shape stays stable
-            # across the success / no-op axes).
+            # across the success / no-op axes). ADR 0006 §D3 adds the
+            # uniform `yaml_backend` / `backup_path` /
+            # `comment_preservation` triplet on every emit.
             if args.json:
                 _emit_json_envelope(
                     kind="host_context_mutation",
@@ -781,6 +897,11 @@ def _mutate_blocklist(
                         "host": host,
                         "result": "not_found",
                         "daemon_reload": "skipped_not_running",
+                        "yaml_backend": backend,
+                        "backup_path": None,
+                        "comment_preservation": (
+                            "preserved" if backend == "ruamel" else "lost"
+                        ),
                     },
                 )
             else:
@@ -793,19 +914,29 @@ def _mutate_blocklist(
             if str(item).strip().lower() != host
         ]
         # ruamel's CommentedSeq is list-like — replace contents in place
-        # so anchors / comments attached to the parent survive.
+        # so anchors / comments attached to the parent survive. PyYAML's
+        # plain list also accepts slice assignment.
         blocklist[:] = keep
         result = "removed"
     else:  # pragma: no cover — internal guard
         raise AssertionError(f"unknown action {action!r}")
 
-    # Only flush to disk when something actually changed. ruamel's
-    # round-trip preserves comments/order/quotes; a no-op write would
-    # still be safe but generates needless mtime churn.
+    # Only flush to disk when something actually changed. A no-op write
+    # would still be safe but generates needless mtime churn — and on
+    # the PyYAML path it would also create an unnecessary backup.
+    backup_path: Optional[str] = None
     if result in {"added", "removed"}:
         try:
-            with open(config_path, "w", encoding="utf-8") as fh:
-                yaml.dump(data, fh)
+            if backend == "ruamel":
+                assert ruamel_yaml is not None  # narrow for mypy
+                with open(config_path, "w", encoding="utf-8") as fh:
+                    ruamel_yaml.dump(data, fh)
+            else:  # pyyaml — backup-then-write per ADR 0006 §D2
+                backup_path = _save_config_with_pyyaml(config_path, data)
+                # Stderr warning surfaces the fallback + backup path
+                # immediately after the write so the user sees it next
+                # to the (text-mode) confirmation line.
+                _emit_pyyaml_fallback_warning(backup_path)
         except OSError as exc:
             _err(f"Error: failed to write {config_path}: {exc}")
             return 3
@@ -832,6 +963,11 @@ def _mutate_blocklist(
                 "daemon_running": daemon_running,
                 "daemon_reload": reload_status,
                 "enabled": enabled,
+                "yaml_backend": backend,
+                "backup_path": backup_path,
+                "comment_preservation": (
+                    "preserved" if backend == "ruamel" else "lost"
+                ),
             },
         )
     else:

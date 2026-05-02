@@ -352,9 +352,13 @@ sentinel --report --json --since 30d > events.json    # versioned envelope
 sentinel context status                # full snapshot (frequency + blocklist + known_hosts)
 sentinel context status api.x.io       # single-host detail (trust level, counts)
 sentinel context forget evil.com       # drop from frequency counter
-sentinel context block   evil.com      # add to config blocklist (requires [app] extra)
+sentinel context block   evil.com      # add to config blocklist (PyYAML fallback if [app] missing)
 sentinel context unblock evil.com      # remove from blocklist
 sentinel context status --json         # ADR 0004 versioned envelope
+
+# Health check (v0.8 Track 1b, ADR 0006)
+sentinel doctor             # one-shot health check (daemon, config, perms, hooks, cache, backups)
+sentinel doctor --json      # machine-readable health snapshot (kind=health_check)
 
 # Claude Code hook
 sentinel hooks install     # Register PreToolUse hook (one-time)
@@ -388,6 +392,24 @@ sentinel --config /path    # Use custom config file
     python3              CPU: 12.1%  MEM: 890MB
 ==================================================
 ```
+
+### Health Check
+
+Run `sentinel doctor` after install or whenever something feels off.
+It validates daemon status, config syntax, file permissions
+(`~/.config/sentinel/` should be `0o700`), Claude Code hook
+installation, the host-context cache, and accumulated config backups
+in a single command. Exit 0 if everything is OK or only WARNs;
+exit 1 if any check FAILs. Add `--json` for the machine-readable
+ADR 0004 §D2 envelope (kind `health_check`).
+
+> `block` and `unblock` modify `config.yaml` in place. They prefer
+> `ruamel.yaml` (from the `[app]` extra) so user comments and key
+> ordering survive. Without the extra, they fall back to PyYAML
+> automatically (ADR 0006): a backup is written at
+> `config.yaml.bak.<epoch>` and a single-line stderr warning surfaces
+> the fallback. Either way, the mutation succeeds and the running
+> daemon picks the change up via SIGHUP automatically.
 
 ## Configuration
 

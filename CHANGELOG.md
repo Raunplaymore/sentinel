@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (v0.8 Track 1b)
+- `sentinel doctor` — one-shot health check (daemon status, config
+  validity, file permissions, hook installation, cache integrity,
+  backup file accumulation, optional dependencies). Text output by
+  default, `--json` envelope (kind=`health_check`) for tooling.
+- ruamel→PyYAML automatic fallback for `sentinel context block /
+  unblock` (ADR 0006). `pip install sentinel-mac` (no extras) is now
+  sufficient for the full mutating-CLI surface; the `[app]` extra
+  remains the preferred path because PyYAML loses comments.
+
+### Changed (v0.8 Track 1b)
+- ADR 0003 §D6 exit code 3 for the ruamel-missing case is superseded
+  by ADR 0006 §D4: ruamel-missing now triggers automatic PyYAML
+  fallback and returns exit 0 if the write succeeds. A single-line
+  stderr warning surfaces the fallback + backup path. JSON envelope
+  gains uniform additive fields `yaml_backend`, `backup_path`,
+  `comment_preservation` on both backends (ADR 0006 §D3).
+- README updated to drop the `[app]`-extra requirement note for
+  `block`/`unblock` and to document `sentinel doctor`.
+
 ### Added (v0.8 Track 1a)
 - SIGHUP-driven daemon reload (ADR 0005). The daemon now picks up
   `config.yaml` mutations without a restart. `sentinel context block /

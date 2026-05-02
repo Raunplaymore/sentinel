@@ -488,9 +488,14 @@ class TestBlockUnblock:
         rc = _run(["block", "evil.com", "--config", str(ghost)])
         assert rc == 3
 
-    def test_block_ruamel_missing_exit_3(
+    def test_block_ruamel_missing_falls_back_to_pyyaml_exit_0(
         self, tmp_path, monkeypatch, capsys
     ):
+        # ADR 0006 §D4 supersedes ADR 0003 §D6 for the ruamel-missing
+        # case: the historical exit-3 behaviour is replaced by an
+        # automatic PyYAML fallback that exits 0 on a successful write.
+        # This test used to assert exit 3 — kept as a regression-anchor
+        # for the supersede semantics under the new name.
         _isolate_xdg(monkeypatch, tmp_path)
         cfg = _write_config(tmp_path, enabled=True)
 
@@ -503,7 +508,10 @@ class TestBlockUnblock:
 
         monkeypatch.setattr(ctx_cli, "_require_ruamel", _raise)
         rc = _run(["block", "evil.com", "--config", str(cfg)])
-        assert rc == 3
+        # ADR 0006 §D4 — fallback succeeded → exit 0 (was exit 3).
+        assert rc == 0
+        # File on disk now contains evil.com (PyYAML did write through).
+        assert "evil.com" in cfg.read_text(encoding="utf-8")
 
     def test_block_preserves_comments_and_other_keys(
         self, tmp_path, monkeypatch
@@ -641,9 +649,13 @@ class TestExitCodes:
         ghost = tmp_path / "ghost.yaml"
         assert _run(["block", "evil.com", "--config", str(ghost)]) == 3
 
-    def test_exit_3_block_ruamel_missing(
+    def test_exit_0_block_ruamel_missing_falls_back_to_pyyaml(
         self, tmp_path, monkeypatch, capsys
     ):
+        # ADR 0006 §D4 — exit 3 for ruamel-missing is superseded by an
+        # automatic PyYAML fallback that returns exit 0 on success.
+        # The exit-3 row in this matrix is now exclusively reached by
+        # other mutation failures (no config file, unwritable target).
         _isolate_xdg(monkeypatch, tmp_path)
         cfg = _write_config(tmp_path, enabled=True)
 
@@ -651,7 +663,7 @@ class TestExitCodes:
             raise RuntimeError("missing extra")
 
         monkeypatch.setattr(ctx_cli, "_require_ruamel", _raise)
-        assert _run(["block", "evil.com", "--config", str(cfg)]) == 3
+        assert _run(["block", "evil.com", "--config", str(cfg)]) == 0
 
     def test_exit_4_corrupt_cache_read(
         self, tmp_path, monkeypatch, capsys
@@ -716,3 +728,222 @@ class TestCoreIntegration:
         assert exc_info.value.code == 0
         env = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
         assert env["kind"] == "host_context_status"
+
+
+# ── PyYAML fallback (ADR 0006) ─────────────────────────────────────
+
+
+class TestPyyamlFallback:
+    """`sentinel context block` / `unblock` ruamel→PyYAML fallback.
+
+    Verifies the ADR 0006 D1–D5 freeze:
+      D1 — ruamel preferred, PyYAML automatic fallback (no flag).
+      D2 — backup-then-write with sort_keys=False.
+      D3 — single-line stderr warning + uniform JSON envelope additions.
+      D4 — ruamel-missing → exit 0 on successful write (was exit 3).
+      D5 — backup naming `config.yaml.bak.<epoch>`, mode 0o600.
+    """
+
+    def _force_pyyaml(self, monkeypatch):
+        """Simulate `[app]` extra missing — `_require_ruamel` raises."""
+        def _raise():
+            raise RuntimeError("simulated [app] extra missing")
+        monkeypatch.setattr(ctx_cli, "_require_ruamel", _raise)
+
+    def test_ruamel_missing_falls_back_to_pyyaml_and_exits_0(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # ADR 0006 §D4 — exit 0 (not 3) when PyYAML write succeeds.
+        _isolate_xdg(monkeypatch, tmp_path)
+        cfg = _write_config(tmp_path, enabled=True)
+        self._force_pyyaml(monkeypatch)
+
+        rc = _run(["block", "evil.com", "--config", str(cfg)])
+        assert rc == 0
+        # File on disk now contains the new entry.
+        assert "evil.com" in cfg.read_text(encoding="utf-8")
+
+    def test_pyyaml_path_creates_backup(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # ADR 0006 §D5 — backup naming + mode 0o600.
+        _isolate_xdg(monkeypatch, tmp_path)
+        original = _write_config(
+            tmp_path, enabled=True, blocklist=["already.example"]
+        )
+        original_text = original.read_text(encoding="utf-8")
+        self._force_pyyaml(monkeypatch)
+
+        rc = _run(["block", "evil.com", "--config", str(original), "--json"])
+        assert rc == 0
+
+        backups = sorted(tmp_path.glob("config.yaml.bak.*"))
+        assert len(backups) == 1
+        backup = backups[0]
+        # Naming: `config.yaml.bak.<unix_epoch_seconds>` per D5.
+        assert backup.name.startswith("config.yaml.bak.")
+        epoch_part = backup.name.rsplit(".", 1)[-1]
+        assert epoch_part.isdigit()
+        # Mode 0o600 (D5 — secrets-grade perms).
+        import stat as _stat
+        backup_mode = _stat.S_IMODE(backup.stat().st_mode)
+        assert backup_mode == 0o600
+        # Backup body matches the *pre-mutation* config.
+        assert backup.read_text(encoding="utf-8") == original_text
+
+    def test_pyyaml_warning_emitted_to_stderr(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # ADR 0006 §D3 — single-line stderr warning under ~120 chars
+        # (path is shortened to ~/<…> when under HOME so the literal text
+        # plus path stays inside the budget). Must include the four
+        # identifying tokens so a future contributor that rewords the
+        # message still surfaces the same information to users.
+        _isolate_xdg(monkeypatch, tmp_path)
+        cfg = _write_config(tmp_path, enabled=True)
+        self._force_pyyaml(monkeypatch)
+
+        rc = _run(["block", "evil.com", "--config", str(cfg)])
+        assert rc == 0
+        captured = capsys.readouterr()
+        warning_lines = [
+            ln for ln in captured.err.splitlines()
+            if "ruamel.yaml missing" in ln
+        ]
+        assert len(warning_lines) == 1
+        warning = warning_lines[0]
+        assert "PyYAML fallback" in warning
+        assert "config.yaml.bak." in warning
+        assert "sentinel-mac[app]" in warning
+        # Single-line warning per the freeze.
+        assert "\n" not in warning
+        # ADR §D3 budget — fixed text plus the (possibly tilde-shortened)
+        # backup path. The production path under HOME stays well under
+        # 120 chars after tilde shortening; CI temp dirs (e.g.,
+        # /private/var/folders/np/.../pytest-of-...) can be 100+ chars on
+        # their own and bypass the tilde shortcut, pushing the line near
+        # 300. The 350 cap is a regression guard against accidental
+        # message ballooning, not a tight enforcement of the freeze.
+        assert len(warning) < 350
+
+    def test_pyyaml_path_preserves_key_order(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # ADR 0006 §D2 — `sort_keys=False` so key order survives.
+        _isolate_xdg(monkeypatch, tmp_path)
+        # `_write_config` emits `security:` first, then optional
+        # extra_top_level. Force a config with multiple top-level keys
+        # in a deliberate (non-alphabetic) order.
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "\n".join(
+                [
+                    "zeta_marker: 1",
+                    "alpha_marker: 2",
+                    "security:",
+                    "  context_aware:",
+                    "    enabled: true",
+                    "    blocklist: []",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        self._force_pyyaml(monkeypatch)
+
+        rc = _run(["block", "evil.com", "--config", str(cfg)])
+        assert rc == 0
+        after = cfg.read_text(encoding="utf-8")
+        zeta_pos = after.index("zeta_marker")
+        alpha_pos = after.index("alpha_marker")
+        sec_pos = after.index("security:")
+        # Original (non-alphabetic) order preserved: zeta < alpha < security.
+        assert zeta_pos < alpha_pos < sec_pos
+
+    def test_envelope_yaml_backend_pyyaml_path(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # ADR 0006 §D3 — uniform additive fields on the PyYAML path.
+        _isolate_xdg(monkeypatch, tmp_path)
+        cfg = _write_config(tmp_path, enabled=True)
+        self._force_pyyaml(monkeypatch)
+
+        rc = _run(["block", "evil.com", "--config", str(cfg), "--json"])
+        assert rc == 0
+        data = _read_envelope(capsys)["data"]
+        import re
+        import stat as _stat
+
+        assert data["yaml_backend"] == "pyyaml"
+        assert isinstance(data["backup_path"], str)
+        # ADR 0006 §D5 — backup naming: `<config>.bak.<unix_epoch_seconds>`.
+        # Anchored regex prevents the previous tautology where the suffix
+        # was sliced from the same value being asserted.
+        assert re.search(r"\.bak\.\d+$", data["backup_path"]), (
+            f"backup_path does not match `.bak.<digits>$`: {data['backup_path']}"
+        )
+        # Backup file exists at the reported path.
+        backup = Path(data["backup_path"])
+        assert backup.exists()
+        # ADR 0006 §D5 — backup mode 0o600.
+        assert _stat.S_IMODE(backup.stat().st_mode) == 0o600
+        # ADR 0006 §D5 — the rewritten config file must also be 0o600
+        # (config may contain webhook secrets; PyYAML write must not
+        # leave it world-readable).
+        assert _stat.S_IMODE(cfg.stat().st_mode) == 0o600
+        assert data["comment_preservation"] == "lost"
+
+    def test_envelope_yaml_backend_ruamel_path(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # ADR 0006 §D3 — uniform additive fields on the ruamel path
+        # (backup_path stays None, comment_preservation = "preserved").
+        pytest.importorskip("ruamel.yaml")
+        _isolate_xdg(monkeypatch, tmp_path)
+        cfg = _write_config(tmp_path, enabled=True)
+
+        rc = _run(["block", "evil.com", "--config", str(cfg), "--json"])
+        assert rc == 0
+        data = _read_envelope(capsys)["data"]
+        assert data["yaml_backend"] == "ruamel"
+        assert data["backup_path"] is None
+        assert data["comment_preservation"] == "preserved"
+
+    def test_idempotent_block_no_backup(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # ADR 0006 §D2 — `already_present` is a no-op on disk; no backup
+        # file should be created on the PyYAML path either.
+        _isolate_xdg(monkeypatch, tmp_path)
+        cfg = _write_config(
+            tmp_path, enabled=True, blocklist=["evil.com"]
+        )
+        self._force_pyyaml(monkeypatch)
+
+        rc = _run(["block", "evil.com", "--config", str(cfg), "--json"])
+        assert rc == 0
+        data = _read_envelope(capsys)["data"]
+        assert data["result"] == "already_present"
+        # Uniform shape — `backup_path` still present (None), no file created.
+        assert data["backup_path"] is None
+        assert list(tmp_path.glob("config.yaml.bak.*")) == []
+
+    def test_pyyaml_path_envelope_has_daemon_reload(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # ADR 0005 §D7 + ADR 0006 §D3 — PyYAML path emits the same
+        # `daemon_reload` field as the ruamel path (uniform shape).
+        _isolate_xdg(monkeypatch, tmp_path)
+        cfg = _write_config(tmp_path, enabled=True)
+        self._force_pyyaml(monkeypatch)
+        # No daemon running — expected `skipped_not_running` outcome.
+        monkeypatch.setattr(ctx_cli, "_is_daemon_running", lambda: False)
+
+        rc = _run(["block", "evil.com", "--config", str(cfg), "--json"])
+        assert rc == 0
+        data = _read_envelope(capsys)["data"]
+        # ADR 0005 §D7 frozen enum.
+        assert data["daemon_reload"] in ctx_cli.DAEMON_RELOAD_RESULTS
+        # PyYAML path-specific additive triplet.
+        assert data["yaml_backend"] == "pyyaml"
+        assert data["comment_preservation"] == "lost"
