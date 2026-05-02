@@ -108,6 +108,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `Daemon not reachable; restart manually...`) on stderr after the
   mutation, replacing the previous `Restart the daemon` notice.
 
+### Changed (v0.8 Track 1c)
+- Main loop and queue drainer now take `_reload_lock` briefly to
+  snapshot live references (engine / host_ctx / event_logger /
+  security_rules) at cycle start, ensuring a mid-cycle SIGHUP reload
+  cannot surface partially-swapped state. Closes the inline TODO
+  from PR #16 (Track 1a). Implements ADR 0005 §D5 verbatim
+  (previously deferred to Track 1c). No user-visible behavior
+  change — pure correctness reinforcement under concurrent reload.
+
 ### Added (v0.8 freeze)
 - ADR 0005 — Daemon Reload Protocol. Freezes the SIGHUP-driven reload
   contract: which sources reload (config / known_hosts / host_context),
