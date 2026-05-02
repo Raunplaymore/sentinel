@@ -43,7 +43,21 @@ It runs as a background daemon, monitoring both system health and AI agent behav
 
 ## Quick Start
 
-### Recommended: git clone (venv + auto-start on login)
+Three install paths — pick whichever fits your workflow. All three end with the same `sentinel` CLI on your `PATH`.
+
+### Option 1 — Recommended: pipx (single-machine, isolated venv)
+
+`pipx` installs the published wheel into its own venv and exposes the `sentinel` binary globally. No repo clone, no manual venv plumbing.
+
+```bash
+pipx install sentinel-mac
+sentinel --init-config
+sentinel start
+```
+
+Trade-off: you do not get the `install.sh` launchd auto-start step — see "Auto-start on login" below if you want the daemon to come up at boot.
+
+### Option 2 — git clone + install.sh (scripted setup with launchd auto-start)
 
 ```bash
 git clone https://github.com/raunplaymore/sentinel.git
@@ -51,7 +65,7 @@ cd sentinel
 bash install.sh            # venv + deps + launchd (auto-starts on login)
 ```
 
-This creates an isolated venv, installs all dependencies, registers a launchd service (auto-start on login), and adds a `sentinel` alias to your shell. After restarting your terminal:
+This creates an isolated venv, installs all dependencies, registers a launchd service (auto-start on login), and adds a `sentinel` alias to your shell. Best when you want to read/modify the source or contribute back. After restarting your terminal:
 
 ```bash
 sentinel start             # Start background service
@@ -64,7 +78,7 @@ sentinel logs              # Tail live logs
 sentinel --help            # All options
 ```
 
-### Alternative: pip install
+### Option 3 — pip install (minimal, manual launchd plist)
 
 ```bash
 python3 -m venv ~/.sentinel-venv
@@ -73,7 +87,7 @@ python3 -m venv ~/.sentinel-venv
 ~/.sentinel-venv/bin/sentinel              # Run in foreground
 ```
 
-To auto-start on login, register with launchd:
+Use this when you already manage your own venvs and prefer the smallest install. Auto-start on login then needs a hand-written LaunchAgent plist:
 
 ```bash
 # Create the LaunchAgent plist
@@ -111,6 +125,18 @@ notifications:
 ```
 
 Then install the [ntfy app](https://ntfy.sh) (iOS / Android) and subscribe to the same topic.
+
+### Claude Code Hook Integration (one-time setup)
+
+If you use Claude Code, install the pre-tool-use hook so Sentinel sees every Bash / Write / WebFetch / MCP call **before** it runs:
+
+```bash
+sentinel hooks install      # one-time
+sentinel hooks status       # verify
+sentinel hooks uninstall    # rollback
+```
+
+Without the hook, Sentinel still detects events from log tailing, but the hook makes detection **synchronous** — Claude Code prompts you (or blocks the tool call) before risky actions happen. Restart Claude Code after `hooks install` for the change to take effect.
 
 ## Two Layers of Protection
 
@@ -321,6 +347,19 @@ sentinel --test-notify     # Send test notification to all active channels
 sentinel --report --since 7d --severity critical
 sentinel --report --since 24h --source agent_log --type agent_command
 sentinel --report --json --since 30d > events.json    # versioned envelope
+
+# Host trust context (v0.6+, ADR 0003)
+sentinel context status                # full snapshot (frequency + blocklist + known_hosts)
+sentinel context status api.x.io       # single-host detail (trust level, counts)
+sentinel context forget evil.com       # drop from frequency counter
+sentinel context block   evil.com      # add to config blocklist (requires [app] extra)
+sentinel context unblock evil.com      # remove from blocklist
+sentinel context status --json         # ADR 0004 versioned envelope
+
+# Claude Code hook
+sentinel hooks install     # Register PreToolUse hook (one-time)
+sentinel hooks status      # Verify the hook is registered
+sentinel hooks uninstall   # Remove the hook
 
 # Setup
 sentinel --init-config     # Generate config at ~/.config/sentinel/config.yaml

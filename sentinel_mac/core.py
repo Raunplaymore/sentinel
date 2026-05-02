@@ -890,8 +890,16 @@ def _hooks_control(subcommand: str):
         })
 
         CLAUDE_SETTINGS_PATH.write_text(json.dumps(settings, indent=2))
-        print("✅ Sentinel hook installed.")
-        print("   Claude Code will now check Bash commands before execution.")
+        print(f"✅ Sentinel Claude Code hook installed at {CLAUDE_SETTINGS_PATH}")
+        print("")
+        print("   Pre-tool-use hook now monitors:")
+        print("     • Bash commands (pipe-to-shell, rm -rf, ssh, eval, etc.)")
+        print("     • Write/Read/Edit on sensitive paths (~/.ssh, .env*, *.pem, ...)")
+        print("     • WebFetch URLs")
+        print("     • MCP tool calls + injection patterns")
+        print("     • Typosquatting (pip/npm install)")
+        print("")
+        print("   Restart Claude Code for the hook to take effect.")
         print("   To uninstall: sentinel hooks uninstall")
         return
 
@@ -1062,6 +1070,12 @@ def main():
         subcommand = sys.argv[2] if len(sys.argv) > 2 else "status"
         _hooks_control(subcommand)
         return
+    # ADR 0003 — `sentinel context …` lives in commands/context.py and owns
+    # its own argparse subparser. Same dispatch shape as `hooks` above to
+    # keep core.main() free of nested subparser plumbing.
+    if len(sys.argv) >= 2 and sys.argv[1] == "context":
+        from sentinel_mac.commands.context import dispatch as _context_dispatch
+        sys.exit(_context_dispatch(sys.argv[2:]))
 
     parser = argparse.ArgumentParser(
         description="Sentinel — AI Agent Security Guardian for macOS",
@@ -1075,7 +1089,12 @@ def main():
                "\nClaude Code integration:\n"
                "  hooks install    Register Sentinel as Claude Code PreToolUse hook\n"
                "  hooks uninstall  Remove Claude Code hook\n"
-               "  hooks status     Check if hook is registered",
+               "  hooks status     Check if hook is registered\n"
+               "\nHost trust context (ADR 0003):\n"
+               "  context status [HOST]   Show snapshot or single-host detail\n"
+               "  context forget HOST     Remove from frequency counter\n"
+               "  context block   HOST    Add to config blocklist\n"
+               "  context unblock HOST    Remove from config blocklist",
     )
     parser.add_argument("command", nargs="?", default=None,
                         choices=["start", "stop", "restart", "status", "logs",
