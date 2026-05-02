@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (v0.8 Track 2 freeze)
+- ADR 0007 — Forensic Context Enrichment. Direct response to a user
+  report ("로그에서 알 수 있는 정보들이 너무 한정적이야 … 누가, 어느
+  프로젝트에서, 뭐를 어떻게"): freezes the contract for surfacing
+  **who / where / what / how** in both the audit log and the
+  user-visible Alert message. `detail.session` (Claude Code session
+  id / model / version / cwd) and `detail.project_meta` (project
+  name / root / git branch / head / remote) added to every relevant
+  SecurityEvent. New `[ctx]` block in Alert messages renders
+  `Project:` / `Session:` / `Where:` / `What:` lines (with macOS
+  truncation guards). Privacy boundary: `git.remote` is
+  audit-log-only, never sent to opt-in notification channels
+  (ntfy / Slack / Telegram). The legacy `bulk_change.detail.project`
+  string field is preserved untouched — the new structured field is
+  named `project_meta` per ADR 0004 §D3 (no key repurposing).
+  Implementation in v0.8 Track 2.
+
 ### Fixed
 - Typosquatting detector no longer false-positives on package-like
   tokens that appear inside quoted strings (e.g., `git commit -m "...pip
