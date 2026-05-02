@@ -139,7 +139,8 @@ reporting:
 ```
 
 `kind` values added by this ADR:
-- `host_context_status` — `status` output
+- `host_context_status` — `status` snapshot output (no HOST argument)
+- `host_context_host_detail` — `status HOST` single-host detail output
 - `host_context_mutation` — `forget` / `block` / `unblock` result
 
 ### D6. Exit codes
@@ -194,7 +195,7 @@ and rejected — adds a runtime dependency for marginal ergonomics.
 - Universal flags: `--json`, `--config PATH`
 - Exit code map (D6 above)
 - `--json` envelope `kind` values: `host_context_status`,
-  `host_context_mutation`
+  `host_context_host_detail`, `host_context_mutation`
 
 Adding new optional flags is fine without superseding ADR. Adding new
 subcommands or repurposing exit codes requires a superseding ADR.
