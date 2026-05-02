@@ -52,6 +52,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   exactly what Sentinel watches, what it writes to disk, and what leaves
   the machine (nothing by default — opt-in notification channels only).
 
+### Fixed
+- agent_download events were being logged to JSONL with correct risk
+  scores but never converted to user-facing Alerts (PR #12 follow-up).
+  AlertEngine now dispatches agent_download to critical / warning / info
+  per ADR 0002 §D5 severity matrix.
+
 ## [0.5.3] - 2026-04-30
 
 ### Added
