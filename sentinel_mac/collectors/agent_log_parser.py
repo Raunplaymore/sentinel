@@ -991,6 +991,18 @@ class AgentLogParser:
             if result is None:
                 continue
 
+            # DEFECT FIX (v0.8): set risk_score on the collector side so
+            # the value persisted to the JSONL audit log matches the
+            # severity of the user-visible Alert. Previously the engine
+            # mutated risk_score in _evaluate_agent_log_event AFTER the
+            # event was already written to disk, so the audit log stored
+            # the dataclass default (0 → "info") while the desktop alert
+            # showed "critical". `sentinel --report --severity critical`
+            # therefore could not surface these events.
+            #
+            # The engine still applies the same mapping idempotently for
+            # backward compatibility (see engine._evaluate_agent_log_event).
+            risk_score = 0.9 if result["confidence"] == "high" else 0.6
             events.append(SecurityEvent(
                 timestamp=timestamp,
                 source="agent_log",
@@ -1012,6 +1024,7 @@ class AgentLogParser:
                     ),
                     "high_risk": result["confidence"] == "high",
                 },
+                risk_score=risk_score,
             ))
 
         return events

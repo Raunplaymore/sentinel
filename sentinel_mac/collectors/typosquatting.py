@@ -10,6 +10,7 @@ Update at each Sentinel version bump. See CLAUDE.md for instructions.
 """
 
 import re
+import shlex
 from typing import Optional
 
 
@@ -143,6 +144,99 @@ POPULAR_NPM = {
 _PIP_EXTRAS_RE = re.compile(r"[>=<!~\[].*")
 _FLAGS_RE = re.compile(r"^-")  # shared for pip and npm flag tokens
 
+# DEFECT FIX (v0.8): package-name validators reject obvious noise that the
+# old regex-only extractor would otherwise feed into the Levenshtein
+# scorer (e.g. `(mypy`, `MCP,`, pure-digit tokens). PEP 503 allows pure
+# digits but real packages never look like that.
+#
+# PEP 503: name = letter/digit, then [letter|digit|.|-|_]*. We cap at
+# 214 chars (PyPI hard limit) and reject pure-digit tokens.
+_PIP_NAME_RE = re.compile(r"^[A-Za-z0-9][-_.A-Za-z0-9]{0,213}$")
+
+# npm registry rules (simplified): lowercase, digits, hyphens, underscores,
+# dots; optional @scope/ prefix. npm rejects uppercase since 2017.
+_NPM_NAME_RE = re.compile(
+    r"^(?:@[a-z0-9][-_.a-z0-9]{0,213}/)?[a-z0-9][-_.a-z0-9]{0,213}$"
+)
+
+
+def _is_valid_pip_name(name: str) -> bool:
+    """Loose PEP 503 check + reject obvious noise (numbers only, etc.)."""
+    if not _PIP_NAME_RE.match(name):
+        return False
+    # Pure-digit "names" are PEP 503 valid technically but never real packages.
+    if name.isdigit():
+        return False
+    return True
+
+
+def _is_valid_npm_name(name: str) -> bool:
+    """npm registry rules + reject pure-numeric noise."""
+    if not _NPM_NAME_RE.match(name):
+        return False
+    if name.isdigit():
+        return False
+    return True
+
+
+# Shell metachars that terminate a subcommand or redirect its I/O.
+# Tokens after these inside the same subcommand are NOT package names
+# (they are output paths, file descriptors, pipelines targets, etc.).
+_SUBCOMMAND_SEPARATORS: frozenset[str] = frozenset({"&&", "||", ";", "&"})
+_REDIRECT_TOKENS: frozenset[str] = frozenset(
+    {">", ">>", "<", "<<", "<<<", "|", "2>", "2>>", "&>", "&>>"}
+)
+
+
+def _split_subcommands(command: str) -> list[list[str]]:
+    """Split a shell command into independent subcommands.
+
+    Tokenizes via :class:`shlex.shlex` with ``punctuation_chars=True`` so
+    quoted strings stay intact (the original bug — `git commit -m
+    "...pip install foo..."` looked like a real install) AND adjacent
+    operators without surrounding whitespace are still recognized
+    (``pip install foo&&pip install bar`` and ``pip install foo>out.txt``
+    both tokenize correctly — the previous ``shlex.split`` glued the
+    operator to a neighboring token, producing ``foo&&pip`` as a single
+    token and missing the second subcommand).
+
+    Splits on the unquoted shell separators ``&&``, ``||``, ``;``, and
+    standalone ``&``. Tokens at or after a redirect operator
+    (``>``, ``<``, ``|`` and friends) are dropped from the current
+    subcommand — they can never be package names.
+
+    Returns one token list per subcommand. Returns ``[]`` if the command
+    is malformed (unclosed quote, etc.) — callers must treat that as
+    "no extractable packages" rather than fall back to the raw string.
+    """
+    try:
+        sh = shlex.shlex(command, posix=True, punctuation_chars=True)
+        sh.whitespace_split = True
+        tokens = list(sh)
+    except ValueError:
+        return []
+    subs: list[list[str]] = []
+    cur: list[str] = []
+    in_redirect_tail = False
+    for tok in tokens:
+        if tok in _SUBCOMMAND_SEPARATORS:
+            if cur:
+                subs.append(cur)
+                cur = []
+            in_redirect_tail = False
+            continue
+        if tok in _REDIRECT_TOKENS:
+            # Everything from here until the next subcommand separator
+            # is redirect plumbing (file paths, FDs) — skip it.
+            in_redirect_tail = True
+            continue
+        if in_redirect_tail:
+            continue
+        cur.append(tok)
+    if cur:
+        subs.append(cur)
+    return subs
+
 # ── Module-level normalized caches (built once at import time) ────────────────
 # Exact-match sets (normalized) for fast O(1) lookups
 POPULAR_PYPI_NORMALIZED: frozenset[str] = frozenset(
@@ -192,41 +286,74 @@ def _levenshtein(a: str, b: str) -> int:
 
 
 def extract_pip_packages(command: str) -> list[str]:
-    """Extract package names from a pip install command string."""
-    # Strip the "pip install" / "pip3 install" prefix
-    match = re.search(r"pip3?\s+install\s+", command)
-    if not match:
-        return []
+    """Extract package names from a ``pip install`` subcommand.
 
-    rest = command[match.end():]
-    packages = []
-    for token in rest.split():
-        # Skip flags like --upgrade, -q, etc.
-        if _FLAGS_RE.match(token):
+    DEFECT FIX (v0.8): the previous implementation regex-scanned the raw
+    command for ``pip install`` and treated every following whitespace
+    token as a package — including tokens that lived inside a quoted
+    string (e.g. ``git commit -m "...pip install foo..."``). We now use
+    :func:`shlex.split` to respect quotes and only recognize a
+    subcommand whose first token is ``pip`` / ``pip3`` (or
+    ``python(3) -m pip``). Each candidate token is validated against
+    :func:`_is_valid_pip_name`, which rejects pure-digit and noise
+    tokens that pollute the typosquatting score.
+
+    Signature is preserved — external callers (``core._hook_check``,
+    ``agent_log_parser._check_typosquatting``) keep working.
+    """
+    packages: list[str] = []
+    for sub in _split_subcommands(command):
+        # Need at least: ["pip", "install", <something>]
+        if len(sub) < 3:
             continue
-        # Strip version specifiers: foo>=1.0 → foo
-        name = _PIP_EXTRAS_RE.sub("", token).strip()
-        if name:
-            packages.append(name)
+        leader = sub[0]
+        if leader in ("pip", "pip3"):
+            if sub[1] != "install":
+                continue
+            rest_start = 2
+        elif (
+            leader in ("python", "python3")
+            and len(sub) >= 5
+            and sub[1] == "-m"
+            and sub[2] == "pip"
+            and sub[3] == "install"
+        ):
+            rest_start = 4
+        else:
+            continue
+        for token in sub[rest_start:]:
+            if _FLAGS_RE.match(token):
+                continue
+            # Strip version specifiers + extras: foo>=1.0 → foo, foo[bar] → foo
+            name = _PIP_EXTRAS_RE.sub("", token).strip()
+            if name and _is_valid_pip_name(name):
+                packages.append(name)
     return packages
 
 
 def extract_npm_packages(command: str) -> list[str]:
-    """Extract package names from an npm/npx install command string."""
-    match = re.search(r"npm\s+(?:install|i|add)\s+", command)
-    if not match:
-        return []
+    """Extract package names from an ``npm install`` / ``add`` subcommand.
 
-    rest = command[match.end():]
-    packages = []
-    for token in rest.split():
-        if _FLAGS_RE.match(token):
+    DEFECT FIX (v0.8): see :func:`extract_pip_packages`. Same shlex +
+    subcommand-leader treatment, validated against npm's stricter
+    naming rules (lowercase, optional ``@scope/`` prefix).
+    """
+    packages: list[str] = []
+    for sub in _split_subcommands(command):
+        if len(sub) < 3:
             continue
-        # Strip version: foo@1.0 → foo (but keep @scope/pkg intact)
-        if "@" in token and not token.startswith("@"):
-            token = token.split("@")[0]
-        if token:
-            packages.append(token)
+        if sub[0] != "npm":
+            continue
+        if sub[1] not in ("install", "i", "add"):
+            continue
+        for token in sub[2:]:
+            if _FLAGS_RE.match(token):
+                continue
+            # Strip version: foo@1.0 → foo (but keep @scope/pkg intact)
+            if "@" in token and not token.startswith("@"):
+                token = token.split("@")[0]
+            if token and _is_valid_npm_name(token):
+                packages.append(token)
     return packages
 
 

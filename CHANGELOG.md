@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Typosquatting detector no longer false-positives on package-like
+  tokens that appear inside quoted strings (e.g., `git commit -m "...pip
+  install foo..."` was previously treating "foo" as an install
+  candidate). Token extraction now uses `shlex.shlex` with
+  `punctuation_chars=True` to respect quotes AND correctly tokenize
+  shell operators without surrounding whitespace
+  (`pip install foo&&pip install bar`, `pip install requets;rm -rf /`).
+  Redirect / pipe targets (`pip install foo > out.txt`,
+  `... | tee log`) are no longer mistaken for package names. Each
+  candidate is validated against PEP 503 / npm naming rules and pure
+  numeric tokens are rejected. Resolves a 20-event false-positive
+  burst observed during the v0.7/v0.8 release work. The same fix
+  applies to the `sentinel hooks install` Claude Code pre-tool-use
+  hook (it shares the extractor) — commit messages no longer trigger
+  the hook either.
+- Typosquatting `risk_score` is now set by the collector before the
+  event is written to the JSONL audit log, so `sentinel --report
+  --severity critical` correctly surfaces high-confidence typosquatting
+  events. Previously the engine mutated `risk_score` post-write so the
+  audit log stored 0 (severity "info") while the desktop alert showed
+  "critical". Other event types (`agent_command`, `agent_tool_use`,
+  `mcp_injection_suspect`, `mcp_tool_call`) still have the same
+  collector-vs-engine `risk_score` divergence — tracked as a v0.8
+  Track 2 follow-up; only `typosquatting_suspect` is fixed in this
+  patch because it is the one currently observed in production.
+
 ### Added (v0.8 Track 1b)
 - `sentinel doctor` — one-shot health check (daemon status, config
   validity, file permissions, hook installation, cache integrity,
