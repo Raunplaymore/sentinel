@@ -281,3 +281,110 @@ class TestSecurityEventAlerts:
         alerts2 = self.engine.evaluate_security_event(event)
         assert len(alerts1) == 1
         assert len(alerts2) == 0  # Suppressed by cooldown
+
+
+# ─── ADR 0007 D3+D5 — fs_watcher project_meta enrichment ──────────
+
+
+class TestFSWatcherProjectMetaEnrichment:
+    """ADR 0007 D5 — bulk_change and per-file events carry project_meta
+    when a ProjectContext is wired. session is intentionally NOT set
+    (D5: fs_watcher cannot derive session attribution).
+    """
+
+    def _make_watcher_with_ctx(self, project_ctx=None):
+        config = {
+            "security": {
+                "fs_watcher": {
+                    "watch_paths": ["/tmp/sentinel-test"],
+                    "sensitive_paths": ["~/.ssh"],
+                    "bulk_threshold": 3,
+                    "bulk_window_seconds": 60,
+                }
+            }
+        }
+        q = queue.Queue(maxsize=100)
+        return FSWatcher(config, q, project_ctx=project_ctx), q
+
+    def test_bulk_change_carries_project_meta_and_keeps_legacy_project(
+        self, tmp_path,
+    ):
+        from sentinel_mac.collectors.project_context import ProjectContext
+        proj = tmp_path / "demo"
+        proj.mkdir()
+        (proj / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\n', encoding="utf-8",
+        )
+        ctx = ProjectContext()
+        watcher, q = self._make_watcher_with_ctx(project_ctx=ctx)
+        # Force bulk_change emission — _track_bulk fires when threshold
+        # is hit AND the cooldown allows it.
+        for i in range(4):
+            watcher._track_bulk(
+                str(proj / f"file{i}.py"), "file_modify",
+            )
+        events = []
+        while not q.empty():
+            events.append(q.get_nowait())
+        bulk = [e for e in events if e.event_type == "bulk_change"]
+        assert bulk, "bulk_change event was not emitted"
+        d = bulk[0].detail
+        # Legacy string field — ADR 0007 D3 naming note: must stay.
+        assert "project" in d
+        assert isinstance(d["project"], str)
+        # New structured field.
+        assert "project_meta" in d
+        assert d["project_meta"] is not None
+        assert d["project_meta"]["name"] == "demo"
+
+    def test_no_project_ctx_yields_null_project_meta_on_bulk(self, tmp_path):
+        proj = tmp_path / "demo"
+        proj.mkdir()
+        (proj / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\n', encoding="utf-8",
+        )
+        watcher, q = self._make_watcher_with_ctx(project_ctx=None)
+        for i in range(4):
+            watcher._track_bulk(
+                str(proj / f"file{i}.py"), "file_modify",
+            )
+        events = []
+        while not q.empty():
+            events.append(q.get_nowait())
+        bulk = [e for e in events if e.event_type == "bulk_change"]
+        assert bulk
+        assert bulk[0].detail["project_meta"] is None
+        # Legacy field still present (string from _guess_project_name).
+        assert "project" in bulk[0].detail or bulk[0].detail.get("project") is None
+
+    def test_lookup_project_meta_for_path_uses_parent_dir(self, tmp_path):
+        from sentinel_mac.collectors.project_context import ProjectContext
+        proj = tmp_path / "demo"
+        proj.mkdir()
+        (proj / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\n', encoding="utf-8",
+        )
+        # File must exist on disk (cwd-resolution requires the parent
+        # directory to be stat-able; file events arrive AFTER the create).
+        src = proj / "src"
+        src.mkdir()
+        (src / "main.py").write_text("# noop", encoding="utf-8")
+        ctx = ProjectContext()
+        watcher, _ = self._make_watcher_with_ctx(project_ctx=ctx)
+        meta = watcher._lookup_project_meta_for_path(
+            str(src / "main.py"),
+        )
+        assert meta is not None
+        assert meta["name"] == "demo"
+
+    def test_bulk_source_cwd_uses_commonpath(self):
+        paths = [
+            "/Users/x/proj/src/a.py",
+            "/Users/x/proj/src/b.py",
+            "/Users/x/proj/tests/c.py",
+        ]
+        assert FSWatcher._bulk_source_cwd(paths) == "/Users/x/proj"
+
+    def test_bulk_source_cwd_empty(self):
+        assert FSWatcher._bulk_source_cwd([]) is None
+

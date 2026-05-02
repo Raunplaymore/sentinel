@@ -53,6 +53,7 @@ Track 1 implementation has a fixed contract.
 | Typosquatting reference list (`collectors/typosquatting.py`) | **No** — hardcoded set, not a config item | Per CLAUDE.md trust model; updated at release time |
 | Daemon PID / lock file | **No** | Owned by process lifecycle |
 | `event_logger` open file handles | **Yes** (close+reopen, **inside the D3 step-6 swap under `_reload_lock`**) | Lets log rotation work cleanly across reload while preventing concurrent writes during the swap |
+| ProjectContext cache (`project_context.py` LRU) | **No** | Pure optimization; TTL picks up filesystem changes lazily. Reload would lose warm entries. Cross-ref ADR 0007 D4. |
 
 ### D3. Reload sequence (atomic-ish, fail-safe)
 

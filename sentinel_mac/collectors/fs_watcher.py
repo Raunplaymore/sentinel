@@ -20,6 +20,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
 from sentinel_mac.models import SecurityEvent
+from sentinel_mac.collectors.project_context import ProjectContext
 from sentinel_mac.collectors.system import MacOSCollector
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -96,12 +97,24 @@ class FSWatcher:
     AI_CMDLINE_KEYWORDS = MacOSCollector.AI_CMDLINE_KEYWORDS
     GENERIC_PROCESS_NAMES = MacOSCollector.GENERIC_PROCESS_NAMES
 
-    def __init__(self, config: dict, event_queue: queue.Queue):
+    def __init__(
+        self,
+        config: dict,
+        event_queue: queue.Queue,
+        project_ctx: Optional[ProjectContext] = None,
+    ):
         sec_config = config.get("security", {}).get("fs_watcher", {})
 
         self._event_queue = event_queue
         self._observer: Optional[Observer] = None
         self._running = False
+
+        # ADR 0007 D5 — project context for project_meta enrichment on
+        # file events (session is not derivable from fs_watcher; that's
+        # the agent_log_parser's job). Optional — when None, project_meta
+        # is omitted from emitted detail dicts and existing tests keep
+        # working unchanged.
+        self._project_ctx: Optional[ProjectContext] = project_ctx
 
         # ADR 0002 — download join state. Populated by register_download()
         # when an agent_download event was just emitted. Cleared on match
@@ -335,6 +348,11 @@ class FSWatcher:
             detail["ai_process"] = True
         if joined:
             detail["joined_to_download"] = True
+
+        # ADR 0007 D3+D5 — derive project_meta from the file's parent
+        # directory. session is intentionally not set (D5: fs_watcher
+        # has no session attribution path).
+        detail["project_meta"] = self._lookup_project_meta_for_path(path)
 
         event = SecurityEvent(
             timestamp=datetime.now(),
@@ -595,11 +613,24 @@ class FSWatcher:
                     "count": count,
                     "top_directories": top_dirs[:5],
                 }
+                # NOTE — `detail["project"]` (string) is the legacy
+                # bulk_change-only field preserved verbatim for
+                # backward compatibility (ADR 0007 §D3 naming note +
+                # ADR 0004 §D3 additive). The new structured field is
+                # `detail["project_meta"]` (dict | None) below.
                 if source_project:
                     detail["project"] = source_project
                 if suspect_name != "unknown":
                     detail["suspect_process"] = suspect_name
                     detail["suspect_pid"] = suspect_pid
+
+                # ADR 0007 D3+D5 — structured project_meta derived from
+                # the common path of affected files (or the first file's
+                # dir as a fallback).
+                source_cwd = self._bulk_source_cwd(paths)
+                detail["project_meta"] = (
+                    self._lookup_project_meta_for_cwd(source_cwd)
+                )
 
                 event = SecurityEvent(
                     timestamp=datetime.now(),
@@ -614,6 +645,52 @@ class FSWatcher:
                     self._event_queue.put_nowait(event)
                 except queue.Full:
                     pass
+
+    # ── ADR 0007 D3+D5 — project_meta enrichment helpers ────────────
+
+    def _lookup_project_meta_for_path(self, file_path: str) -> Optional[dict]:
+        """Return the project_meta dict for ``file_path``'s parent dir.
+
+        Returns None when no ProjectContext is wired or no project
+        boundary is found within the walk depth cap.
+        """
+        if self._project_ctx is None:
+            return None
+        try:
+            parent = str(Path(file_path).parent)
+        except (TypeError, ValueError):
+            return None
+        return self._project_ctx.lookup(parent)
+
+    def _lookup_project_meta_for_cwd(self, cwd: Optional[str]) -> Optional[dict]:
+        """Return the project_meta dict for ``cwd``. Mirrors the lookup
+        used by _lookup_project_meta_for_path but skips the ``Path(...)
+        .parent`` derivation since ``cwd`` is already a directory.
+        """
+        if self._project_ctx is None:
+            return None
+        return self._project_ctx.lookup(cwd)
+
+    @staticmethod
+    def _bulk_source_cwd(paths: list[str]) -> Optional[str]:
+        """Pick a representative source directory for a bulk_change event.
+
+        Uses ``os.path.commonpath`` when paths share a non-trivial prefix,
+        otherwise falls back to the first file's parent dir. Returns None
+        when ``paths`` is empty.
+        """
+        if not paths:
+            return None
+        try:
+            common = os.path.commonpath(paths)
+            if common and common != "/":
+                return common
+        except (ValueError, OSError):
+            pass
+        try:
+            return str(Path(paths[0]).parent)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _analyze_bulk_paths(paths: list[str]) -> list[str]:

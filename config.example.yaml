@@ -150,6 +150,19 @@ security:
     cache_path: ""
     blocklist: []
 
+  # ── Forensic Project Context (v0.8, ADR 0007) ──
+  # Resolves a working directory to {name, root, git: {branch, head, remote}}
+  # so every alert and audit-log row answers "which project / branch /
+  # commit". No `enabled` flag — project context is always-on (free at
+  # point of use, cached, no PII risk; git.remote is audit-log-only and
+  # never surfaced in notification channels per ADR 0007 D7). To suppress
+  # enrichment for a specific collector, drop project_ctx wiring at the
+  # injection site in core.py rather than configuring it off here.
+  project_context:
+    ttl_seconds: 300            # 5 min cache lifetime
+    max_entries: 100            # bounded LRU cap
+    max_walk_depth: 10          # parent dirs to scan for project boundary
+
   # ── Custom Rules (Advanced) ──
   # Define your own regex-based detection rules.
   # source: fs_watcher, agent_log, net_tracker, or "all"

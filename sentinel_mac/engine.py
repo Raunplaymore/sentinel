@@ -4,11 +4,106 @@ import re
 import logging
 from datetime import datetime
 from collections import deque
+from pathlib import Path
 from typing import Optional
 
 from sentinel_mac.models import SystemMetrics, Alert, SecurityEvent
 
 logger = logging.getLogger(__name__)
+
+
+# ── ADR 0007 D6 — Forensic context [ctx] block ────────────────────────
+# Append a short 4-line block (Project / Session / Where / What) to the
+# Alert message so a single notification answers "who/where/what" without
+# the user grepping the JSONL audit log.
+#
+# Privacy boundary (D7): `git.remote` is intentionally NOT surfaced in
+# the user-visible alert text — it stays in the audit log only.
+
+# macOS Notification Center truncates around ~250 chars; the `What:`
+# line is the longest and most variable, so we cap it here. cwd gets
+# `~/` substitution under HOME for the same reason.
+_CTX_COMMAND_MAX_CHARS = 80
+
+
+def _format_ctx_block(detail: dict) -> str:
+    """ADR 0007 D6 — render the ``[ctx]`` block for an Alert message.
+
+    Reads the ``session`` (D2) and ``project_meta`` (D3) sub-dicts from
+    ``detail`` (both nullable, both may be missing on event types
+    without enrichment such as MacOSCollector system-thermal alerts).
+
+    Returns the empty string when neither block has anything to show —
+    callers append unconditionally so it's safe to use ``message + ctx``.
+
+    Output shape (each line indented 3 spaces to match the existing
+    notification body convention):
+
+        \\n
+           Project: <name> (<branch> @ <head>)
+           Session: <model> #<id8> (CC <version>)
+           Where:   <cwd>
+           What:    <command>
+
+    Per ADR D7 the audit log keeps git.remote; this helper omits it.
+    """
+    if not isinstance(detail, dict):
+        return ""
+
+    session = detail.get("session") or {}
+    project = detail.get("project_meta")
+
+    lines: list[str] = []
+
+    # Project line: name (branch @ head) | name (branch) | name
+    if isinstance(project, dict):
+        name = project.get("name")
+        git = project.get("git") or {}
+        branch = git.get("branch") if isinstance(git, dict) else None
+        head = git.get("head") if isinstance(git, dict) else None
+        if name and branch and head:
+            lines.append(f"   Project: {name} ({branch} @ {head})")
+        elif name and branch:
+            lines.append(f"   Project: {name} ({branch})")
+        elif name:
+            lines.append(f"   Project: {name}")
+
+    # Session line: model #shortid (CC version) | model #shortid | model | #shortid
+    if isinstance(session, dict):
+        sid = session.get("id")
+        model = session.get("model")
+        version = session.get("version")
+        short_sid = (sid or "")[:8] if isinstance(sid, str) else ""
+        if model and short_sid and version:
+            lines.append(f"   Session: {model} #{short_sid} (CC {version})")
+        elif model and short_sid:
+            lines.append(f"   Session: {model} #{short_sid}")
+        elif model:
+            lines.append(f"   Session: {model}")
+        elif short_sid:
+            lines.append(f"   Session: #{short_sid}")
+
+        cwd = session.get("cwd")
+        if isinstance(cwd, str) and cwd:
+            # macOS truncation guard: ~/ substitution under HOME (D6).
+            try:
+                home = str(Path.home())
+                if home and cwd.startswith(home):
+                    cwd = "~" + cwd[len(home):]
+            except Exception:
+                pass
+            lines.append(f"   Where:   {cwd}")
+
+    # What line: command (truncated to 80 chars per D6 macOS-tightened cap).
+    command = detail.get("command")
+    if isinstance(command, str) and command:
+        if len(command) > _CTX_COMMAND_MAX_CHARS:
+            command = command[: _CTX_COMMAND_MAX_CHARS - 1] + "…"
+        lines.append(f"   What:    {command}")
+
+    if not lines:
+        return ""
+    return "\n\n" + "\n".join(lines)
 
 
 class AlertEngine:
@@ -217,6 +312,17 @@ class AlertEngine:
         if self._custom_rules:
             custom_alerts = self._evaluate_custom_rules(event)
             alerts.extend(self._apply_cooldowns(custom_alerts, now=event.timestamp))
+
+        # ADR 0007 D6 — append the [ctx] block to every alert message
+        # produced from a SecurityEvent. The block is best-effort: when
+        # neither `session` nor `project_meta` carry usable fields the
+        # helper returns "" and the message is unchanged. Strict addition
+        # to existing message text — preserves substring-based regression
+        # tests (e.g., `assert "Risk: pipe to shell" in alert.message`).
+        ctx_block = _format_ctx_block(event.detail)
+        if ctx_block:
+            for alert in alerts:
+                alert.message = alert.message + ctx_block
 
         return alerts
 

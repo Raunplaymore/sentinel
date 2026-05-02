@@ -18,6 +18,7 @@ import re
 import shlex
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -25,6 +26,7 @@ from urllib.parse import urlparse
 
 from sentinel_mac.models import SecurityEvent
 from sentinel_mac.collectors.context import HostContext, TrustLevel
+from sentinel_mac.collectors.project_context import ProjectContext
 from sentinel_mac.collectors.typosquatting import (
     check_typosquatting,
     extract_pip_packages,
@@ -32,6 +34,65 @@ from sentinel_mac.collectors.typosquatting import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ── ADR 0007 D1: per-session metadata cache ─────────────────────────────
+# Captured from the first ``user`` / ``assistant`` record of each JSONL
+# file (housekeeping records — queue-operation / last-prompt / summary /
+# permission-mode / file-history-snapshot — are skipped because they
+# don't carry cwd / gitBranch / version / model). Defensive reads only:
+# missing keys leave the corresponding field None and never raise.
+
+# ADR 0007 D1 explicitly lists {queue-operation, last-prompt, summary} as
+# the housekeeping prefix that does not carry session metadata. Observed
+# Claude Code 2.1.x JSONLs add `permission-mode` and `file-history-snapshot`
+# in the same prefix position — they also lack cwd/version/gitBranch, so
+# we extend the skip set as a conservative additive (skip-only — never
+# changes which types CAN populate metadata, only which to bypass).
+_SESSION_HOUSEKEEPING_TYPES: frozenset[str] = frozenset({
+    "queue-operation",
+    "last-prompt",
+    "summary",
+    "permission-mode",
+    "file-history-snapshot",
+})
+
+
+@dataclass
+class SessionMeta:
+    """ADR 0007 D1 — session metadata extracted from a JSONL file.
+
+    All fields are nullable. The cache is per-file (JSONL path → meta);
+    cwd is overridden per-message at emit time because Claude Code's
+    ``cd`` updates the per-record cwd field but not the cached
+    session-start value.
+    """
+    id: Optional[str] = None
+    model: Optional[str] = None
+    version: Optional[str] = None
+    cwd: Optional[str] = None
+    git_branch: Optional[str] = None
+
+
+def _build_session_detail(
+    meta: Optional[SessionMeta], per_message_cwd: Optional[str]
+) -> dict:
+    """ADR 0007 D2 — build the ``session`` sub-dict for SecurityEvent.detail.
+
+    Always returns a dict with all four keys present (id / model /
+    version / cwd); any unknown field is None. Per ADR 0007 D1 step 4,
+    ``cwd`` prefers the per-message override and falls back to the
+    cached session-start cwd.
+    """
+    if meta is None:
+        meta = SessionMeta()
+    return {
+        "id": meta.id,
+        "model": meta.model,
+        "version": meta.version,
+        "cwd": per_message_cwd or meta.cwd,
+    }
+
 
 # ── Sensitive file path detection ─────────────────────────────────────────────
 # Prefix-based: directories where any access is sensitive
@@ -624,6 +685,7 @@ class AgentLogParser:
         config: dict,
         event_queue: queue.Queue,
         host_ctx: Optional[HostContext] = None,
+        project_ctx: Optional[ProjectContext] = None,
     ):
         sec_config = config.get("security", {}).get("agent_logs", {})
 
@@ -639,6 +701,21 @@ class AgentLogParser:
                 cache_path=Path("/dev/null"),
             )
         self._host_ctx: HostContext = host_ctx
+
+        # ADR 0007 D4 — project context. Optional injection so existing
+        # callers/tests keep working; when None, project_meta enrichment
+        # is omitted (set to None on every emitted detail dict).
+        self._project_ctx: Optional[ProjectContext] = project_ctx
+
+        # ADR 0007 D1 — per-file session metadata cache. Populated lazily
+        # on the first user/assistant record we see in each JSONL file.
+        # Key: absolute JSONL path. Value: SessionMeta (mutated in place).
+        self._session_meta: dict[str, SessionMeta] = {}
+
+        # ADR 0007 D1 — track which file we're currently processing so the
+        # per-record handlers can build session/project context without
+        # threading the path through every internal call signature.
+        self._current_file: Optional[str] = None
 
         # Configured parsers
         self._parsers = sec_config.get("parsers", [
@@ -770,14 +847,21 @@ class AgentLogParser:
                 new_data = f.read()
                 self._file_positions[file_path] = f.tell()
 
-            for line in new_data.strip().splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    entry = json.loads(line)
-                    self._process_claude_code_entry(entry)
-                except json.JSONDecodeError:
-                    continue
+            # ADR 0007 D1 — set the current file so per-record handlers
+            # can pull (and mutate) the right SessionMeta from the cache.
+            previous_file = self._current_file
+            self._current_file = file_path
+            try:
+                for line in new_data.strip().splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        self._process_claude_code_entry(entry)
+                    except json.JSONDecodeError:
+                        continue
+            finally:
+                self._current_file = previous_file
 
         except OSError as e:
             logger.debug(f"AgentLogParser: cannot read {file_path}: {e}")
@@ -785,6 +869,13 @@ class AgentLogParser:
     def _process_claude_code_entry(self, entry: dict):
         """Process a single Claude Code JSONL entry."""
         entry_type = entry.get("type", "")
+
+        # ADR 0007 D1 — capture session metadata on the first user /
+        # assistant record (housekeeping records like queue-operation /
+        # last-prompt / summary / permission-mode / file-history-snapshot
+        # don't carry cwd/gitBranch/version/model). Defensive — never
+        # raise on missing keys.
+        self._update_session_meta(entry, entry_type)
 
         # Check tool_result for MCP injection
         if entry_type == "tool_result":
@@ -819,7 +910,9 @@ class AgentLogParser:
 
             # Track MCP tool calls
             if tool_name.startswith("mcp__") and self._rule_mcp:
-                self._handle_mcp_tool_call(tool_name, tool_input, timestamp)
+                self._handle_mcp_tool_call(
+                    tool_name, tool_input, timestamp, entry,
+                )
 
             self._evaluate_tool_call(tool_name, tool_input, timestamp, entry)
 
@@ -861,7 +954,12 @@ class AgentLogParser:
                 },
             ))
 
+        # ADR 0007 D2+D3 — enrich every emitted detail with session +
+        # project_meta before queueing. Per-message cwd from this entry
+        # overrides the cached session-start cwd (D1 step 4).
+        per_message_cwd = self._entry_cwd(entry)
         for event in events:
+            self._enrich_detail(event.detail, per_message_cwd=per_message_cwd)
             try:
                 self._event_queue.put_nowait(event)
             except queue.Full:
@@ -1070,7 +1168,8 @@ class AgentLogParser:
         )]
 
     def _handle_mcp_tool_call(self, tool_name: str, tool_input: dict,
-                              timestamp: datetime):
+                              timestamp: datetime,
+                              entry: Optional[dict] = None):
         """Log MCP tool calls as informational events."""
         # Parse mcp__serverName__toolName
         parts = tool_name.split("__")
@@ -1092,10 +1191,106 @@ class AgentLogParser:
                 "risk_reason": "MCP tool invocation",
             },
         )
+        # ADR 0007 D2+D3 — enrich with session + project_meta.
+        per_message_cwd = self._entry_cwd(entry) if entry else None
+        self._enrich_detail(event.detail, per_message_cwd=per_message_cwd)
         try:
             self._event_queue.put_nowait(event)
         except queue.Full:
             logger.warning("AgentLogParser: event queue full, dropping MCP event")
+
+    # ── ADR 0007 D1+D2+D3 enrichment helpers ─────────────────────────
+
+    def _update_session_meta(self, entry: dict, entry_type: str) -> None:
+        """ADR 0007 D1 — populate per-file SessionMeta from a JSONL record.
+
+        Skips housekeeping records that don't carry the metadata we need.
+        Defensive reads via ``dict.get`` — a future Claude Code release
+        renaming any of these fields leaves the corresponding session.*
+        sub-field None and the daemon keeps running.
+        """
+        if entry_type in _SESSION_HOUSEKEEPING_TYPES:
+            return
+        # We accept user/assistant/system/attachment as metadata sources
+        # because they all carry sessionId/cwd/gitBranch/version on the
+        # observed Claude Code 2.1.x JSONL shape. Only assistant carries
+        # the model field on `message.model`.
+        file_path = self._current_file
+        if not file_path:
+            return
+
+        meta = self._session_meta.get(file_path)
+        if meta is None:
+            meta = SessionMeta()
+            self._session_meta[file_path] = meta
+
+        # First-write-wins for stable fields (sessionId/cwd/gitBranch/version
+        # are session-wide). cwd is intentionally first-write-wins here
+        # because per-message cwd is re-derived at emit time from the
+        # triggering record (ADR 0007 D1 step 4).
+        if meta.id is None:
+            sid = entry.get("sessionId")
+            if isinstance(sid, str) and sid:
+                meta.id = sid
+        if meta.cwd is None:
+            cwd = entry.get("cwd")
+            if isinstance(cwd, str) and cwd:
+                meta.cwd = cwd
+        if meta.version is None:
+            ver = entry.get("version")
+            if isinstance(ver, str) and ver:
+                meta.version = ver
+        if meta.git_branch is None:
+            gb = entry.get("gitBranch")
+            if isinstance(gb, str) and gb:
+                meta.git_branch = gb
+        if meta.model is None and entry_type == "assistant":
+            message = entry.get("message")
+            if isinstance(message, dict):
+                model = message.get("model")
+                if isinstance(model, str) and model:
+                    meta.model = model
+
+    def _current_session_meta(self) -> Optional[SessionMeta]:
+        """Return the SessionMeta for the file currently being tailed
+        (or None when called outside a tail loop, e.g., direct
+        ``parse_line`` invocation in tests)."""
+        if not self._current_file:
+            return None
+        return self._session_meta.get(self._current_file)
+
+    def _enrich_detail(
+        self, detail: dict, *, per_message_cwd: Optional[str] = None
+    ) -> dict:
+        """ADR 0007 D2+D3 — overlay session + project_meta on a detail dict.
+
+        Mutates ``detail`` in place and also returns it for call-site
+        ergonomics. Always sets both keys; either or both may be None
+        (event types without enrichment context).
+
+        ``per_message_cwd`` defaults to the cached session-start cwd
+        (D1 step 4 — the per-record cwd should be passed by the caller
+        when known so ``cd`` mid-session is reflected).
+        """
+        meta = self._current_session_meta()
+        effective_cwd = per_message_cwd or (meta.cwd if meta else None)
+
+        detail["session"] = _build_session_detail(meta, effective_cwd)
+
+        if self._project_ctx is None:
+            detail["project_meta"] = None
+        else:
+            branch_hint = meta.git_branch if meta else None
+            detail["project_meta"] = self._project_ctx.lookup(
+                effective_cwd, branch_hint=branch_hint,
+            )
+        return detail
+
+    @staticmethod
+    def _entry_cwd(entry: dict) -> Optional[str]:
+        """Defensively pull the per-message cwd from a JSONL record."""
+        cwd = entry.get("cwd") if isinstance(entry, dict) else None
+        return cwd if isinstance(cwd, str) and cwd else None
 
     def _check_mcp_tool_result(self, entry: dict):
         """Check MCP tool_result responses for prompt injection patterns."""
@@ -1139,6 +1334,11 @@ class AgentLogParser:
                         "content_preview": content[:300],
                         "high_risk": True,
                     },
+                )
+                # ADR 0007 D2+D3 — enrich with session + project_meta.
+                per_message_cwd = self._entry_cwd(entry)
+                self._enrich_detail(
+                    event.detail, per_message_cwd=per_message_cwd,
                 )
                 try:
                     self._event_queue.put_nowait(event)
