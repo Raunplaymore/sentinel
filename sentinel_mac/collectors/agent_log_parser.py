@@ -940,6 +940,11 @@ class AgentLogParser:
 
         elif tool_name == "WebFetch" and self._rule_web_fetch:
             url = tool_input.get("url", "")
+            # DEFECT FIX (v0.8 Track 2b, mirrors PR #18): set risk_score
+            # on the collector side so the persisted JSONL audit row
+            # carries the same severity as the user-visible Alert. The
+            # engine still applies the same mapping idempotently (see
+            # engine._evaluate_agent_log_event WebFetch branch).
             events.append(SecurityEvent(
                 timestamp=timestamp,
                 source="agent_log",
@@ -952,6 +957,7 @@ class AgentLogParser:
                     "url": url,
                     "risk_reason": "external URL fetch",
                 },
+                risk_score=0.3,
             ))
 
         # ADR 0007 D2+D3 — enrich every emitted detail with session +
@@ -991,6 +997,12 @@ class AgentLogParser:
                 "high_risk": True,
             }
 
+            # DEFECT FIX (v0.8 Track 2b, mirrors PR #18): default to the
+            # high-risk score (engine maps to "critical"). Trust downgrade
+            # below may lower this for SSH/SCP + KNOWN/LEARNED hosts so
+            # the persisted JSONL severity matches the downgraded Alert.
+            risk_score = 0.9
+
             # ADR D4 enforcement: host-trust downgrade is restricted to a
             # frozen whitelist of reasons. Categories outside it skip the
             # context lookup entirely so trust signals can never weaken
@@ -1006,6 +1018,14 @@ class AgentLogParser:
                         detail["downgrade_reason"] = (
                             f"host trust={trust.value}"
                         )
+                        # Trust-downgraded SSH/SCP: engine never assigns
+                        # 0.9 in this branch (the high_risk gate is
+                        # False), so the alert is suppressed entirely
+                        # for built-in rules. Persist a small info-level
+                        # score so the audit row is not "critical" and
+                        # --report --severity critical does not
+                        # surface a downgraded ssh.
+                        risk_score = 0.2
 
             events.append(SecurityEvent(
                 timestamp=timestamp,
@@ -1015,6 +1035,7 @@ class AgentLogParser:
                 event_type="agent_command",
                 target=command[:200],  # Truncate for readability
                 detail=detail,
+                risk_score=risk_score,
             ))
             break  # One match is enough
 
@@ -1132,6 +1153,10 @@ class AgentLogParser:
         """Check if a file write/edit targets a sensitive location."""
         if not _is_sensitive_path(file_path):
             return []
+        # DEFECT FIX (v0.8 Track 2b, mirrors PR #18): collector pre-sets
+        # risk_score so the JSONL audit row carries the same severity as
+        # the user-visible Alert. Engine still re-asserts the same value
+        # idempotently for callers that bypass the collector.
         return [SecurityEvent(
             timestamp=timestamp,
             source="agent_log",
@@ -1145,6 +1170,7 @@ class AgentLogParser:
                 "risk_reason": "write to sensitive file",
                 "high_risk": True,
             },
+            risk_score=0.8,
         )]
 
     def _check_file_read(self, file_path: str,
@@ -1152,6 +1178,10 @@ class AgentLogParser:
         """Check if a file read targets a sensitive location."""
         if not _is_sensitive_path(file_path):
             return []
+        # DEFECT FIX (v0.8 Track 2b, mirrors PR #18): same as
+        # _check_file_write — read of a sensitive file is a high-risk
+        # agent_tool_use and must persist with risk_score=0.8 so the
+        # audit log severity matches the warning-level Alert.
         return [SecurityEvent(
             timestamp=timestamp,
             source="agent_log",
@@ -1165,6 +1195,7 @@ class AgentLogParser:
                 "risk_reason": "read of sensitive file",
                 "high_risk": True,
             },
+            risk_score=0.8,
         )]
 
     def _handle_mcp_tool_call(self, tool_name: str, tool_input: dict,
@@ -1176,6 +1207,10 @@ class AgentLogParser:
         server_name = parts[1] if len(parts) >= 3 else "unknown"
         method_name = parts[2] if len(parts) >= 3 else tool_name
 
+        # DEFECT FIX (v0.8 Track 2b, mirrors PR #18): MCP tool calls are
+        # info-level (engine maps to 0.2). Setting it on the collector
+        # side keeps the JSONL audit row in lockstep with the Alert
+        # level so --report --severity info correctly buckets them.
         event = SecurityEvent(
             timestamp=timestamp,
             source="agent_log",
@@ -1190,6 +1225,7 @@ class AgentLogParser:
                 "input_keys": list(tool_input.keys()) if isinstance(tool_input, dict) else [],
                 "risk_reason": "MCP tool invocation",
             },
+            risk_score=0.2,
         )
         # ADR 0007 D2+D3 — enrich with session + project_meta.
         per_message_cwd = self._entry_cwd(entry) if entry else None
@@ -1320,6 +1356,12 @@ class AgentLogParser:
         # Check against injection patterns
         for pattern, reason in MCP_INJECTION_PATTERNS:
             if pattern.search(content):
+                # DEFECT FIX (v0.8 Track 2b, mirrors PR #18): MCP
+                # injection is the highest-severity agent_log event
+                # type (engine maps to 0.95 → critical). Persist the
+                # score on the collector side so the JSONL audit row
+                # is correctly classified for --report --severity
+                # critical.
                 event = SecurityEvent(
                     timestamp=timestamp,
                     source="agent_log",
@@ -1334,6 +1376,7 @@ class AgentLogParser:
                         "content_preview": content[:300],
                         "high_risk": True,
                     },
+                    risk_score=0.95,
                 )
                 # ADR 0007 D2+D3 — enrich with session + project_meta.
                 per_message_cwd = self._entry_cwd(entry)

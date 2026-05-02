@@ -475,7 +475,16 @@ class AlertEngine:
         is_high_risk = event.detail.get("high_risk", False)
 
         if is_high_risk and event.event_type == "agent_command":
-            # High-risk bash command
+            # High-risk bash command.
+            # NOTE (v0.8 Track 2b — same defect class as PR #18):
+            # collector (agent_log_parser._check_bash_command) now sets
+            # risk_score=0.9 before queueing so the JSONL audit row
+            # carries the right severity. The trust-downgrade SSH/SCP
+            # branch in the collector lowers it to 0.2 and clears
+            # high_risk so this whole `if` is skipped — the lowered
+            # score therefore reaches disk untouched. We re-assert 0.9
+            # here as a defensive idempotent guard for callers that
+            # bypass the collector (test fixtures, custom integrations).
             event.risk_score = 0.9
             command = event.detail.get("command", event.target)
             alerts.append(Alert(
@@ -486,7 +495,13 @@ class AlertEngine:
                 emoji="\U0001f534", priority=5
             ))
         elif is_high_risk and event.event_type == "agent_tool_use":
-            # High-risk tool use (e.g. write to sensitive path)
+            # High-risk tool use (e.g. write to sensitive path).
+            # NOTE (v0.8 Track 2b — same defect class as PR #18):
+            # collector (_check_file_write / _check_file_read) now sets
+            # risk_score=0.8 before the JSONL audit write. We re-assert
+            # the same value idempotently so the engine remains the
+            # source of the alert level and the collector is the source
+            # of the persisted score; the two stay in lockstep.
             event.risk_score = 0.8
             alerts.append(Alert(
                 level="warning", category="agent_sensitive_write",
@@ -496,7 +511,12 @@ class AlertEngine:
                 emoji="\U0001f7e0", priority=4
             ))
         elif event.event_type == "mcp_injection_suspect":
-            # MCP prompt injection detected — critical
+            # MCP prompt injection detected — critical.
+            # NOTE (v0.8 Track 2b — same defect class as PR #18):
+            # collector (_check_mcp_tool_result) now sets risk_score=0.95
+            # before queueing so the JSONL audit row matches the
+            # critical Alert. Idempotent re-assertion here protects
+            # callers that bypass the collector.
             event.risk_score = 0.95
             matched = event.detail.get("matched_pattern", "unknown")
             preview = event.detail.get("content_preview", "")[:150]
@@ -509,7 +529,12 @@ class AlertEngine:
                 emoji="\U0001f534", priority=5
             ))
         elif event.event_type == "mcp_tool_call":
-            # MCP tool invocation — informational
+            # MCP tool invocation — informational.
+            # NOTE (v0.8 Track 2b — same defect class as PR #18):
+            # collector (_handle_mcp_tool_call) now sets risk_score=0.2
+            # before queueing. Idempotent re-assertion keeps engine and
+            # collector mappings in lockstep; both must agree on 0.2 so
+            # --report --severity info correctly buckets these events.
             event.risk_score = 0.2
             server = event.detail.get("server", "unknown")
             method = event.detail.get("method", "unknown")
@@ -542,7 +567,16 @@ class AlertEngine:
                 emoji="\U0001f7e0", priority=4
             ))
         elif event.event_type == "agent_tool_use" and tool == "WebFetch":
-            # URL fetch — informational
+            # URL fetch — informational.
+            # NOTE (v0.8 Track 2b — same defect class as PR #18):
+            # collector (_evaluate_tool_call WebFetch branch) now sets
+            # risk_score=0.3 before queueing. Engine re-asserts the
+            # same value idempotently for callers that bypass the
+            # collector. Note: agent_tool_use covers two distinct
+            # branches in this method — sensitive write (high_risk →
+            # 0.8) above and WebFetch (info → 0.3) here. The collector
+            # disambiguates by setting the score correctly per branch
+            # at emit time, so the persisted score is always right.
             event.risk_score = 0.3
             alerts.append(Alert(
                 level="info", category="agent_web_fetch",

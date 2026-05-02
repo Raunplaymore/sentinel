@@ -50,6 +50,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   collector-vs-engine `risk_score` divergence — tracked as a v0.8
   Track 2 follow-up; only `typosquatting_suspect` is fixed in this
   patch because it is the one currently observed in production.
+- Audit log severity now matches user-visible alert severity for the
+  remaining 4 event types (`agent_command`, `agent_tool_use`,
+  `mcp_injection_suspect`, `mcp_tool_call`) — same defect class as
+  PR #18 typosquatting fix, applied to the rest of the agent_log
+  pipeline. `sentinel --report --severity critical` now correctly
+  surfaces high-risk Bash commands (curl-pipe-to-shell, rm -rf, eval,
+  base64 -d, nc -l, inline code exec, arbitrary package installs) and
+  MCP injection suspects; `--severity warning` surfaces sensitive
+  file writes/reads; `--severity info` correctly buckets MCP tool
+  calls and WebFetch events. SSH/SCP commands downgraded by host
+  trust persist with `risk_score=0.2` (info) so the audit log mirrors
+  the suppressed-alert state. Closes the v0.8 Track 2 follow-up TODO
+  from PR #18.
 
 ### Added (v0.8 Track 1b)
 - `sentinel doctor` — one-shot health check (daemon status, config
