@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (v0.7 freeze)
+- ADR 0002 — Agent Download Tracking. Freezes the new
+  `agent_download` SecurityEvent type, detail schema, FSWatcher join
+  logic (5-minute window), extraction patterns (curl / wget / git clone),
+  and severity escalation rules. Implementation in v0.7 Track B.
+- ADR 0003 — `sentinel context` CLI subcommands. Freezes the four
+  verbs (`status` / `forget` / `block` / `unblock`), config-inline
+  blocklist persistence via ruamel, daemon-independent operation,
+  `--json` envelope, and exit-code map. Implementation in v0.7 Track C.
+- ADR 0004 — Pro Branch Optionality. Cross-cutting constraints applied
+  during v0.7 (and beyond unless superseded): no license plumbing
+  until a Pro feature lands; all `--json` uses a versioned envelope
+  (`{version, kind, generated_at, data}`); `SecurityEvent.detail`
+  schemas are additive; blocklist / custom_rules / notification
+  channels stay layer-able for future Pro extension; audit log
+  forwarding wraps the OSS `event_logger`, never modifies it.
+
 ### Added
 - HostContext API frozen for v0.6 context-aware detection
   (`sentinel_mac/collectors/context.py` skeleton). Opt-in, default OFF.
