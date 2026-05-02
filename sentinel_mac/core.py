@@ -4,17 +4,20 @@ Sentinel — AI Session Guardian for macOS
 Monitors system resources and sends smart alerts via ntfy.sh
 """
 
+import argparse as _argparse
 import json
 import logging
 import queue
+import re
 import signal
 import subprocess
 import sys
 import os
 import fcntl
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 from logging.handlers import RotatingFileHandler
 
 # Re-export from new modules so existing imports (tests, sentinel.py) keep working
@@ -420,64 +423,342 @@ class Sentinel:
 
 
 # ─────────────────────────────────────────────
-# Report
+# Report — filter helpers (v0.7 Track A)
 # ─────────────────────────────────────────────
 
-def generate_report(days: int = 1) -> None:
-    """Read JSONL event logs and print a summary report."""
+# Severity classification thresholds. Public constants so consumers (tests,
+# future Pro tooling) can reference the same boundaries.
+SEVERITY_CRITICAL_THRESHOLD = 0.8
+SEVERITY_WARNING_THRESHOLD = 0.4
+VALID_SEVERITIES = frozenset({"critical", "warning", "info"})
+
+# parse_since upper bound — protects against typos like "9999d" that would
+# load every JSONL on disk. 365d covers retention (90d default) + slack.
+_PARSE_SINCE_MAX_SECONDS = 365 * 86400
+
+# `7d` / `24h` / `30m` / `3600s` / bare integer (seconds).
+_DURATION_RE = re.compile(r"^\s*(?P<num>\d+)\s*(?P<unit>[smhd]?)\s*$")
+_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "": 1}
+
+
+def _classify_severity(risk_score: float) -> str:
+    """Map a numeric risk_score to a severity label.
+
+    Mapping (matches pre-v0.7 behavior in generate_report):
+      >= 0.8        → critical
+      0.4 .. 0.8    → warning
+      < 0.4         → info
+    """
+    if risk_score >= SEVERITY_CRITICAL_THRESHOLD:
+        return "critical"
+    if risk_score >= SEVERITY_WARNING_THRESHOLD:
+        return "warning"
+    return "info"
+
+
+def parse_since(value: str) -> int:
+    """Parse --since duration into seconds.
+
+    Supported suffixes: s (seconds), m (minutes), h (hours), d (days).
+    A bare integer is interpreted as seconds.
+
+    Raises:
+        argparse.ArgumentTypeError: on invalid format, non-positive value,
+            or value exceeding 365 days.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise _argparse.ArgumentTypeError(
+            "invalid --since value: expected like '7d', '24h', '30m', '3600s', or integer seconds"
+        )
+    m = _DURATION_RE.match(value)
+    if not m:
+        raise _argparse.ArgumentTypeError(
+            f"invalid --since value: {value!r} (expected '7d' / '24h' / '30m' / '3600s' / integer)"
+        )
+    try:
+        num = int(m.group("num"))
+    except ValueError as exc:  # pragma: no cover — regex already constrained
+        raise _argparse.ArgumentTypeError(f"invalid --since value: {value!r}") from exc
+    unit = m.group("unit") or ""
+    seconds = num * _UNIT_SECONDS[unit]
+    if seconds <= 0:
+        raise _argparse.ArgumentTypeError(
+            f"--since must be positive, got {value!r}"
+        )
+    if seconds > _PARSE_SINCE_MAX_SECONDS:
+        raise _argparse.ArgumentTypeError(
+            f"--since exceeds 365 days cap (got {value!r})"
+        )
+    return seconds
+
+
+def _parse_csv_set(
+    value: Optional[str],
+    *,
+    valid: Optional[set] = None,
+    flag: str = "filter",
+) -> Optional[set]:
+    """Parse a comma-separated argparse value into a set of trimmed tokens.
+
+    None or all-whitespace input returns None (meaning "no filter").
+    Optional `valid` argument enforces an enum; violations raise
+    argparse.ArgumentTypeError listing the offending tokens.
+    """
+    if value is None:
+        return None
+    tokens = {tok.strip() for tok in value.split(",") if tok.strip()}
+    if not tokens:
+        return None
+    if valid is not None:
+        invalid = sorted(tokens - set(valid))
+        if invalid:
+            raise _argparse.ArgumentTypeError(
+                f"--{flag}: invalid value(s) {invalid!r}; allowed: {sorted(valid)!r}"
+            )
+    return tokens
+
+
+# ─────────────────────────────────────────────
+# Report — main entrypoint
+# ─────────────────────────────────────────────
+
+
+def _iter_event_lines(events_dir: Path, start_dt: datetime, end_dt: datetime):
+    """Yield (filepath, raw_line) for events in the dated JSONL range.
+
+    Streams line-by-line — never holds the full file in memory. Files outside
+    the [start_dt, end_dt] day range are skipped without opening.
+    """
+    # Iterate inclusive day range (start day .. end day) — JSONL day files are
+    # named YYYY-MM-DD.jsonl by event_logger._rotate.
+    cur = start_dt.date()
+    end = end_dt.date()
+    while cur <= end:
+        filepath = events_dir / "{}.jsonl".format(cur.strftime("%Y-%m-%d"))
+        if filepath.exists():
+            with open(filepath, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        yield filepath, line
+        cur = cur + timedelta(days=1)
+
+
+def generate_report(
+    *,
+    since_seconds: Optional[int] = None,
+    severity: Optional[set] = None,
+    sources: Optional[set] = None,
+    types: Optional[set] = None,
+    as_json: bool = False,
+    data_dir: Optional[Path] = None,
+    days: Optional[int] = None,
+) -> None:
+    """Read JSONL event logs, apply filters, and emit a summary report.
+
+    Filters:
+        since_seconds: only include events where ts >= now - since_seconds.
+            If None, the full retention window is scanned.
+        severity: subset of {"critical", "warning", "info"}. None → no filter.
+        sources: matched against event["source"] (e.g., "agent_log",
+            "net_tracker", "fs_watcher"). None → no filter.
+        types: matched against event["event_type"] (free-form, e.g.,
+            "agent_command", "net_connect", "agent_download"). None → no filter.
+
+    Output:
+        as_json=False (default): human-readable summary on stdout.
+        as_json=True: ADR 0004 §D2 versioned envelope on stdout —
+            {"version", "kind", "generated_at", "data": {filters, summary, events}}.
+            The envelope is emitted even when no events match (consumers can
+            rely on a stable shape).
+
+    Backward-compat:
+        Pre-v0.7 callers used ``generate_report(days=N)`` — that signature is
+        preserved via the ``days`` adapter (converted to since_seconds).
+    """
     import json as _json
     from collections import Counter
 
-    data_dir = resolve_data_dir()
+    # Backward-compat adapter: days → since_seconds.
+    if since_seconds is None and days is not None:
+        since_seconds = days * 86400
+    if since_seconds is None:
+        # Default: today only (matches pre-v0.7 `--report` no-arg behavior).
+        since_seconds = 86400
+
+    if data_dir is None:
+        data_dir = resolve_data_dir()
     events_dir = data_dir / "events"
 
     if not events_dir.exists():
-        print("No event logs found.")
+        if as_json:
+            _emit_json_envelope(
+                kind="report_events",
+                payload={
+                    "filters": _filters_payload(since_seconds, severity, sources, types),
+                    "summary": {
+                        "total": 0, "critical": 0, "warning": 0, "info": 0,
+                        "by_source": {},
+                    },
+                    "events": [],
+                },
+            )
+        else:
+            print("No event logs found.")
         return
 
-    today = datetime.now()
-    start_date = today - timedelta(days=days - 1)
+    now = datetime.now()
+    cutoff = now - timedelta(seconds=since_seconds)
 
-    # Collect events from date range
-    events = []
-    for d in range(days):
-        date = start_date + timedelta(days=d)
-        filepath = events_dir / "{}.jsonl".format(date.strftime("%Y-%m-%d"))
-        if not filepath.exists():
+    matched: list = []
+    for _, raw in _iter_event_lines(events_dir, cutoff, now):
+        try:
+            event = _json.loads(raw)
+        except _json.JSONDecodeError:
             continue
-        with open(filepath, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        events.append(_json.loads(line))
-                    except _json.JSONDecodeError:
-                        pass
+
+        # Time filter — events without parseable ts are dropped (corrupt line).
+        ts_raw = event.get("ts")
+        if not isinstance(ts_raw, str):
+            continue
+        try:
+            ts_dt = datetime.fromisoformat(ts_raw)
+        except ValueError:
+            continue
+        # event_logger writes naive local-time ISO strings, but be defensive:
+        # if a tz-aware ts ever lands (manual edit, future writer), drop the
+        # tzinfo to compare against `cutoff` (naive local now()).
+        if ts_dt.tzinfo is not None:
+            ts_dt = ts_dt.replace(tzinfo=None)
+        if ts_dt < cutoff:
+            continue
+
+        # Source filter
+        if sources is not None and event.get("source") not in sources:
+            continue
+
+        # Type filter
+        if types is not None and event.get("event_type") not in types:
+            continue
+
+        # Severity classification + filter
+        risk = event.get("risk_score", 0) or 0
+        sev = _classify_severity(float(risk))
+        if severity is not None and sev not in severity:
+            continue
+
+        # Annotate severity onto the event for consumer convenience
+        # (ADR 0004 §D3 — additive only, never reuse existing keys).
+        event["severity"] = sev
+        matched.append(event)
+
+    if as_json:
+        critical = sum(1 for e in matched if e["severity"] == "critical")
+        warning = sum(1 for e in matched if e["severity"] == "warning")
+        info = sum(1 for e in matched if e["severity"] == "info")
+        by_source = dict(Counter(e.get("source", "unknown") for e in matched))
+        _emit_json_envelope(
+            kind="report_events",
+            payload={
+                "filters": _filters_payload(since_seconds, severity, sources, types),
+                "summary": {
+                    "total": len(matched),
+                    "critical": critical,
+                    "warning": warning,
+                    "info": info,
+                    "by_source": by_source,
+                },
+                "events": matched,
+            },
+        )
+        return
+
+    # ─── Text output ──────────────────────────────────────────────────
+    _print_text_report(matched, since_seconds, severity, sources, types, now)
+
+
+def _filters_payload(
+    since_seconds: int,
+    severity: Optional[set],
+    sources: Optional[set],
+    types: Optional[set],
+) -> dict:
+    """Stable JSON-friendly representation of the active filter spec."""
+    return {
+        "since_seconds": since_seconds,
+        "severity": sorted(severity) if severity else None,
+        "sources": sorted(sources) if sources else None,
+        "types": sorted(types) if types else None,
+    }
+
+
+def _emit_json_envelope(*, kind: str, payload: dict) -> None:
+    """Serialize and print an ADR 0004 §D2 versioned envelope to stdout."""
+    envelope = {
+        "version": 1,
+        "kind": kind,
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "data": payload,
+    }
+    print(json.dumps(envelope, ensure_ascii=False))
+
+
+def _format_since_label(since_seconds: int) -> str:
+    """Render since_seconds back into a human label for the text header."""
+    if since_seconds % 86400 == 0:
+        n = since_seconds // 86400
+        return f"Last {n} day{'s' if n != 1 else ''}"
+    if since_seconds % 3600 == 0:
+        n = since_seconds // 3600
+        return f"Last {n} hour{'s' if n != 1 else ''}"
+    if since_seconds % 60 == 0:
+        n = since_seconds // 60
+        return f"Last {n} minute{'s' if n != 1 else ''}"
+    return f"Last {since_seconds}s"
+
+
+def _print_text_report(
+    events: list,
+    since_seconds: int,
+    severity: Optional[set],
+    sources: Optional[set],
+    types: Optional[set],
+    now: datetime,
+) -> None:
+    from collections import Counter
+
+    sev_label = ", ".join(sorted(severity)) if severity else "any"
+    src_label = ", ".join(sorted(sources)) if sources else "any"
+    type_label = ", ".join(sorted(types)) if types else "any"
+    period_label = _format_since_label(since_seconds)
 
     if not events:
-        print("No events recorded in the selected period.")
+        print("")
+        print("=" * 50)
+        print("  Sentinel Report")
+        print("  {}  |  severity: {}  |  source: {}".format(period_label, sev_label, src_label))
+        if types is not None:
+            print("  type: {}".format(type_label))
+        print("=" * 50)
+        print("")
+        print("  No events matched the selected filters.")
+        print("")
+        print("=" * 50)
+        print("")
         return
 
-    # Classify by risk_score
-    critical = [e for e in events if e.get("risk_score", 0) >= 0.8]
-    warning = [e for e in events if 0.4 <= e.get("risk_score", 0) < 0.8]
-    info = [e for e in events if e.get("risk_score", 0) < 0.4]
-
-    # Top sources
+    critical = [e for e in events if e["severity"] == "critical"]
+    warning = [e for e in events if e["severity"] == "warning"]
+    info = [e for e in events if e["severity"] == "info"]
     source_counts = Counter(e.get("source", "unknown") for e in events)
-
-    # Notable events (critical, most recent first)
     notable = sorted(critical, key=lambda e: e.get("ts", ""), reverse=True)[:5]
-
-    # Format
-    period_start = start_date.strftime("%Y-%m-%d")
-    period_end = today.strftime("%Y-%m-%d")
-    period_label = period_start if days == 1 else "{} ~ {}".format(period_start, period_end)
 
     print("")
     print("=" * 50)
     print("  Sentinel Report")
-    print("  {}".format(period_label))
+    print("  {}  |  severity: {}  |  source: {}".format(period_label, sev_label, src_label))
+    if types is not None:
+        print("  type: {}".format(type_label))
     print("=" * 50)
     print("")
     print("  Events: {} total".format(len(events)))
@@ -774,7 +1055,25 @@ def main():
     parser.add_argument("--test-notify", action="store_true", help="Send test notification")
     parser.add_argument("--version", "-v", action="version", version=f"sentinel-mac {__version__}")
     parser.add_argument("--report", nargs="?", const=1, type=int, metavar="DAYS",
-                        help="Show event summary (default: today, or specify number of days)")
+                        help="Show event summary (default: today, or specify number of days). "
+                             "Combine with --since/--severity/--source/--type to filter; "
+                             "--json emits an ADR 0004 versioned envelope.")
+    parser.add_argument("--since", default=None, metavar="DURATION",
+                        help="Filter --report events to the last DURATION "
+                             "(e.g., '7d', '24h', '30m', '3600s', or integer seconds). "
+                             "Overrides --report DAYS when both supplied. Max 365d.")
+    parser.add_argument("--severity", default=None, metavar="LEVELS",
+                        help="Comma-separated severity filter for --report "
+                             "(critical,warning,info).")
+    parser.add_argument("--source", default=None, metavar="SOURCES",
+                        help="Comma-separated source filter for --report "
+                             "(agent_log,net_tracker,fs_watcher).")
+    parser.add_argument("--type", default=None, metavar="EVENT_TYPES",
+                        help="Comma-separated event_type filter for --report "
+                             "(e.g., agent_command,net_connect,file_modify,agent_download).")
+    parser.add_argument("--json", action="store_true",
+                        help="Emit --report output as JSON (ADR 0004 §D2 versioned envelope: "
+                             "{version, kind, generated_at, data}).")
     parser.add_argument("--init-config", action="store_true",
                         help="Generate config.yaml in ~/.config/sentinel/")
     args = parser.parse_args()
@@ -793,7 +1092,23 @@ def main():
         return
 
     if args.report is not None:
-        generate_report(args.report)
+        try:
+            since_seconds = (
+                parse_since(args.since) if args.since else args.report * 86400
+            )
+            severity = _parse_csv_set(args.severity, valid=set(VALID_SEVERITIES), flag="severity")
+            sources = _parse_csv_set(args.source, flag="source")
+            types = _parse_csv_set(args.type, flag="type")
+        except _argparse.ArgumentTypeError as exc:
+            parser.error(str(exc))
+            return  # parser.error raises SystemExit; defensive
+        generate_report(
+            since_seconds=since_seconds,
+            severity=severity,
+            sources=sources,
+            types=types,
+            as_json=args.json,
+        )
         return
 
     if args.init_config:

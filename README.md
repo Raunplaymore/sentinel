@@ -317,6 +317,11 @@ sentinel --report          # Today's event summary
 sentinel --report 7        # Last 7 days event summary
 sentinel --test-notify     # Send test notification to all active channels
 
+# Filtered reports
+sentinel --report --since 7d --severity critical
+sentinel --report --since 24h --source agent_log --type agent_command
+sentinel --report --json --since 30d > events.json    # versioned envelope
+
 # Setup
 sentinel --init-config     # Generate config at ~/.config/sentinel/config.yaml
 sentinel --version         # Show version
