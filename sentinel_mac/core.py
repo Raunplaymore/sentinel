@@ -20,6 +20,7 @@ from logging.handlers import RotatingFileHandler
 # Re-export from new modules so existing imports (tests, sentinel.py) keep working
 from sentinel_mac.models import SystemMetrics, Alert, SecurityEvent  # noqa: F401
 from sentinel_mac.collectors.system import MacOSCollector  # noqa: F401
+from sentinel_mac.collectors.context import HostContext  # noqa: F401
 from sentinel_mac.collectors.fs_watcher import FSWatcher  # noqa: F401
 from sentinel_mac.collectors.net_tracker import NetTracker  # noqa: F401
 from sentinel_mac.collectors.agent_log_parser import AgentLogParser  # noqa: F401
@@ -260,6 +261,11 @@ class Sentinel:
         self._net_tracker: NetTracker | None = None
         self._agent_log_parser: AgentLogParser | None = None
 
+        # Host context (ADR 0001) — shared across collectors. Disabled by
+        # default; load() is idempotent and a no-op when disabled.
+        self.host_ctx = HostContext.from_config(self.config)
+        self.host_ctx.load()
+
         # Start security collectors if enabled
         sec_config = self.config.get("security", {})
         if sec_config.get("enabled", False):
@@ -268,10 +274,16 @@ class Sentinel:
                 self._fs_watcher = FSWatcher(self.config, self._security_queue)
             net_config = sec_config.get("net_tracker", {})
             if net_config.get("enabled", True):
-                self._net_tracker = NetTracker(self.config, self._security_queue)
+                self._net_tracker = NetTracker(
+                    self.config, self._security_queue,
+                    host_ctx=self.host_ctx,
+                )
             agent_config = sec_config.get("agent_logs", {})
             if agent_config.get("enabled", True):
-                self._agent_log_parser = AgentLogParser(self.config, self._security_queue)
+                self._agent_log_parser = AgentLogParser(
+                    self.config, self._security_queue,
+                    host_ctx=self.host_ctx,
+                )
 
         self.interval = self.config.get("check_interval_seconds", 30)
         self.status_interval = self.config.get("status_interval_minutes", 60)
@@ -316,6 +328,12 @@ class Sentinel:
             self._fs_watcher.stop()
         if self._agent_log_parser:
             self._agent_log_parser.stop()
+        # ADR 0001 D2: final flush so observations from the current window
+        # survive a clean shutdown. No-op when context is disabled.
+        try:
+            self.host_ctx.flush()
+        except Exception as exc:  # pragma: no cover — flush is best-effort
+            logging.debug("host_ctx.flush() failed during shutdown: %s", exc)
         self._event_logger.close()
         if self._pid_file and not self._pid_file.closed:
             fcntl.flock(self._pid_file, fcntl.LOCK_UN)
@@ -372,6 +390,10 @@ class Sentinel:
                 now = datetime.now()
                 if (now - self._last_status).total_seconds() > self.status_interval * 60:
                     self.notifier.send_status(metrics)
+                    # ADR 0001 D2: piggy-back host context flush on the
+                    # status report tick so we do not own a separate timer.
+                    # No-op when context is disabled.
+                    self.host_ctx.flush()
                     self._last_status = now
 
             except Exception as e:

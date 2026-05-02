@@ -120,6 +120,26 @@ security:
       mcp: true                          # MCP tool calls + injection detection
       typosquatting: true                # pip/npm install of mistyped names
 
+  # ── Context-Aware Detection (v0.6, opt-in) ──
+  # Reduces false positives by recognizing hosts you have explicitly
+  # trusted (~/.ssh/known_hosts) or have repeatedly accessed.
+  # When enabled, an alert that would normally fire as "warning" for a
+  # known host is downgraded to "info". UNKNOWN and BLOCKED hosts are
+  # unaffected. See docs/decisions/0001-host-context.md.
+  #
+  # Privacy: when enabled, Sentinel writes a list of remote hostnames you
+  # connect to under ~/.local/share/sentinel/host_context.jsonl (mode 0700).
+  # Disable by setting `enabled: false` (default) — nothing is written.
+  context_aware:
+    enabled: false
+    auto_trust_after_seen: 5
+    learning_window_days: 30
+    dedup_window_seconds: 3600
+    max_tracked_hosts: 5000
+    known_hosts_path: "~/.ssh/known_hosts"
+    cache_path: ""
+    blocklist: []
+
   # ── Custom Rules (Advanced) ──
   # Define your own regex-based detection rules.
   # source: fs_watcher, agent_log, net_tracker, or "all"

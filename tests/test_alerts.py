@@ -8,6 +8,7 @@ from sentinel_mac.core import (
     Alert,
     AlertEngine,
 )
+from sentinel_mac.models import SecurityEvent
 
 
 def make_metrics(**kwargs):
@@ -284,3 +285,95 @@ class TestCooldowns:
         )
         alerts2 = engine.evaluate(m2)
         assert any(a.category == "battery_critical" for a in alerts2)
+
+
+# ─── Host-trust downgrade (ADR 0001) ───
+
+
+class TestTrustDowngrade:
+    """AlertEngine.evaluate_security_event applies host-trust downgrade."""
+
+    def setup_method(self):
+        self.engine = AlertEngine(DEFAULT_CONFIG)
+
+    def _net_event(self, **detail_overrides):
+        detail = {
+            "remote_ip": "5.6.7.8",
+            "remote_port": 443,
+            "hostname": "evil.example.com",
+            "allowed": False,
+            "nonstandard_port": False,
+        }
+        detail.update(detail_overrides)
+        return SecurityEvent(
+            timestamp=datetime.now(),
+            source="net_tracker",
+            actor_pid=1234,
+            actor_name="ollama",
+            event_type="net_connect",
+            target="evil.example.com:443",
+            detail=detail,
+        )
+
+    def test_downgrade_warning_to_info(self):
+        """warning + downgrade=True → info."""
+        engine = AlertEngine(DEFAULT_CONFIG)
+        event = self._net_event(trust_level="known", downgrade=True)
+        alerts = engine.evaluate_security_event(event)
+        assert len(alerts) == 1
+        assert alerts[0].level == "info"
+
+    def test_downgrade_critical_to_warning(self):
+        """critical + downgrade=True → warning."""
+        engine = AlertEngine(DEFAULT_CONFIG)
+        event = self._net_event(
+            remote_port=4444,
+            nonstandard_port=True,
+            trust_level="learned",
+            downgrade=True,
+        )
+        alerts = engine.evaluate_security_event(event)
+        assert len(alerts) == 1
+        assert alerts[0].level == "warning"
+
+    def test_blocked_trust_ignores_downgrade_flag(self):
+        """trust=blocked overrides downgrade=True (defense in depth)."""
+        engine = AlertEngine(DEFAULT_CONFIG)
+        event = self._net_event(
+            remote_port=4444,
+            nonstandard_port=True,
+            trust_level="blocked",
+            downgrade=True,
+        )
+        alerts = engine.evaluate_security_event(event)
+        assert len(alerts) == 1
+        assert alerts[0].level == "critical"
+
+    def test_no_downgrade_field_no_change(self):
+        """Events without downgrade fields behave exactly as before."""
+        engine = AlertEngine(DEFAULT_CONFIG)
+        event = self._net_event()  # no trust_level / downgrade
+        alerts = engine.evaluate_security_event(event)
+        assert len(alerts) == 1
+        assert alerts[0].level == "warning"
+
+    def test_downgrade_false_no_change(self):
+        engine = AlertEngine(DEFAULT_CONFIG)
+        event = self._net_event(trust_level="unknown", downgrade=False)
+        alerts = engine.evaluate_security_event(event)
+        assert len(alerts) == 1
+        assert alerts[0].level == "warning"
+
+    def test_info_stays_info_under_downgrade(self):
+        """info is already minimum — downgrade is a no-op, not an error."""
+        engine = AlertEngine(DEFAULT_CONFIG)
+        event = self._net_event(
+            remote_port=9999,
+            allowed=True,
+            nonstandard_port=True,
+            trust_level="known",
+            downgrade=True,
+        )
+        alerts = engine.evaluate_security_event(event)
+        assert len(alerts) == 1
+        assert alerts[0].level == "info"

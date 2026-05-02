@@ -9,11 +9,13 @@ import logging
 import queue
 import socket
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import psutil
 
 from sentinel_mac.models import SecurityEvent
+from sentinel_mac.collectors.context import HostContext, TrustLevel
 from sentinel_mac.collectors.system import MacOSCollector
 
 logger = logging.getLogger(__name__)
@@ -33,11 +35,25 @@ class NetTracker:
     AI_CMDLINE_KEYWORDS = MacOSCollector.AI_CMDLINE_KEYWORDS
     GENERIC_PROCESS_NAMES = MacOSCollector.GENERIC_PROCESS_NAMES
 
-    def __init__(self, config: dict, event_queue: queue.Queue):
+    def __init__(
+        self,
+        config: dict,
+        event_queue: queue.Queue,
+        host_ctx: Optional[HostContext] = None,
+    ):
         sec_config = config.get("security", {}).get("net_tracker", {})
 
         self._event_queue = event_queue
         self._alert_on_unknown = sec_config.get("alert_on_unknown", True)
+
+        # Host context — when None, build a disabled instance so calls are
+        # cheap no-ops and existing tests keep working.
+        if host_ctx is None:
+            host_ctx = HostContext(
+                enabled=False,
+                cache_path=Path("/dev/null"),
+            )
+        self._host_ctx: HostContext = host_ctx
 
         # Allowlist patterns (supports wildcards like *.github.com)
         self._allowlist = sec_config.get("allowlist", [
@@ -109,6 +125,13 @@ class NetTracker:
             hostname = self._resolve_hostname(remote_ip)
             display_host = hostname if hostname != remote_ip else remote_ip
 
+            # Context-aware: observe and classify the host (independent of
+            # the allowlist decision so frequency learns even for trusted
+            # hosts). Disabled host_ctx makes both calls cheap no-ops and
+            # classify() returns UNKNOWN — preserves prior behavior exactly.
+            self._host_ctx.observe(hostname)
+            trust = self._host_ctx.classify(hostname)
+
             # Check allowlist
             is_allowed = self._is_allowed(hostname, remote_ip)
 
@@ -126,6 +149,10 @@ class NetTracker:
                     "hostname": display_host,
                     "allowed": is_allowed,
                     "nonstandard_port": is_nonstandard_port,
+                    "trust_level": trust.value,
+                    # AlertEngine reads `downgrade` to drop severity by 1
+                    # step. BLOCKED/UNKNOWN never downgrade.
+                    "downgrade": trust in (TrustLevel.LEARNED, TrustLevel.KNOWN),
                 }
 
                 event = SecurityEvent(

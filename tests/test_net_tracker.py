@@ -2,9 +2,11 @@
 import queue
 import pytest
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 from collections import namedtuple
 
+from sentinel_mac.collectors.context import HostContext, TrustLevel
 from sentinel_mac.collectors.net_tracker import NetTracker
 from sentinel_mac.engine import AlertEngine
 from sentinel_mac.models import SecurityEvent
@@ -292,3 +294,182 @@ class TestNetworkEventAlerts:
         alerts2 = self.engine.evaluate_security_event(event)
         assert len(alerts1) == 1
         assert len(alerts2) == 0  # Suppressed by cooldown
+
+
+# ─── NetTracker × HostContext integration tests (v0.6) ───
+
+
+class TestNetTrackerWithContext:
+    """Integration: NetTracker emits trust_level + downgrade in event detail.
+
+    Disabled context must preserve prior behavior exactly (regression
+    guard). Enabled context must populate trust_level and set the
+    downgrade flag for KNOWN/LEARNED hosts only — never for BLOCKED.
+    """
+
+    def _make_connection(self, pid, remote_ip, remote_port,
+                         status="ESTABLISHED"):
+        conn = MagicMock()
+        conn.pid = pid
+        conn.status = status
+        raddr = MagicMock()
+        raddr.ip = remote_ip
+        raddr.port = remote_port
+        conn.raddr = raddr
+        return conn
+
+    def _make_tracker(self, host_ctx=None):
+        config = {
+            "security": {
+                "net_tracker": {
+                    "allowlist": ["api.anthropic.com"],
+                }
+            }
+        }
+        q = queue.Queue(maxsize=100)
+        return NetTracker(config, q, host_ctx=host_ctx), q
+
+    def test_disabled_context_default_trust_unknown(self, tmp_path):
+        """No host_ctx kwarg → disabled HostContext, trust=unknown, downgrade=False."""
+        tracker, q = self._make_tracker(host_ctx=None)
+        conn = self._make_connection(1234, "5.6.7.8", 443)
+
+        with patch("psutil.net_connections", return_value=[conn]), \
+             patch.object(tracker, "_get_process_name", return_value="ollama"), \
+             patch.object(tracker, "_resolve_hostname",
+                          return_value="evil.example.com"):
+            tracker.poll()
+
+        event = q.get_nowait()
+        assert event.detail["trust_level"] == "unknown"
+        assert event.detail["downgrade"] is False
+
+    def test_known_host_marks_downgrade(self, tmp_path):
+        """known_hosts match → trust=known, downgrade=True."""
+        kh = tmp_path / "known_hosts"
+        kh.write_text(
+            "bastion.example.com ssh-ed25519 AAAA...\n",
+            encoding="utf-8",
+        )
+        ctx = HostContext(
+            enabled=True,
+            cache_path=tmp_path / "ctx.jsonl",
+            known_hosts_path=kh,
+        )
+        ctx.load()
+
+        tracker, q = self._make_tracker(host_ctx=ctx)
+        conn = self._make_connection(1234, "5.6.7.8", 443)
+
+        with patch("psutil.net_connections", return_value=[conn]), \
+             patch.object(tracker, "_get_process_name", return_value="ollama"), \
+             patch.object(tracker, "_resolve_hostname",
+                          return_value="bastion.example.com"):
+            tracker.poll()
+
+        # Note: bastion is in allowlist=False (only anthropic is) and on
+        # standard port 443 — so allowed=False, nonstandard_port=False.
+        # That means an event IS emitted (unknown host, standard port).
+        event = q.get_nowait()
+        assert event.detail["trust_level"] == "known"
+        assert event.detail["downgrade"] is True
+
+    def test_blocked_host_no_downgrade(self, tmp_path):
+        """blocklist match → trust=blocked, downgrade=False (never weaken)."""
+        ctx = HostContext(
+            enabled=True,
+            cache_path=tmp_path / "ctx.jsonl",
+            known_hosts_path=None,
+            blocklist=["evil.example.com"],
+        )
+        ctx.load()
+
+        tracker, q = self._make_tracker(host_ctx=ctx)
+        conn = self._make_connection(1234, "5.6.7.8", 443)
+
+        with patch("psutil.net_connections", return_value=[conn]), \
+             patch.object(tracker, "_get_process_name", return_value="ollama"), \
+             patch.object(tracker, "_resolve_hostname",
+                          return_value="evil.example.com"):
+            tracker.poll()
+
+        event = q.get_nowait()
+        assert event.detail["trust_level"] == "blocked"
+        assert event.detail["downgrade"] is False
+
+    def test_observe_called_even_for_allowed_host(self, tmp_path):
+        """observe() runs regardless of allowlist — frequency learns globally."""
+        ctx = HostContext(
+            enabled=True,
+            cache_path=tmp_path / "ctx.jsonl",
+            known_hosts_path=None,
+            auto_trust_after_seen=2,
+            dedup_window_seconds=0,
+        )
+        ctx.load()
+
+        tracker, q = self._make_tracker(host_ctx=ctx)
+        # api.anthropic.com IS in the allowlist — no event will fire,
+        # but observe() still runs.
+        conn = self._make_connection(1234, "1.2.3.4", 443)
+
+        with patch("psutil.net_connections", return_value=[conn]), \
+             patch.object(tracker, "_get_process_name", return_value="ollama"), \
+             patch.object(tracker, "_resolve_hostname",
+                          return_value="api.anthropic.com"):
+            tracker.poll()
+
+        # Even though no event was queued (allowed, standard port), the
+        # observation was recorded.
+        assert ctx.seen_count("api.anthropic.com") == 1
+
+    def test_engine_downgrades_warning_for_known_host(self, tmp_path):
+        """End-to-end: net event w/ trust=known + downgrade=True → info."""
+        engine = AlertEngine(DEFAULT_CONFIG)
+        event = SecurityEvent(
+            timestamp=datetime.now(),
+            source="net_tracker",
+            actor_pid=1234,
+            actor_name="ollama",
+            event_type="net_connect",
+            target="bastion.example.com:443",
+            detail={
+                "remote_ip": "5.6.7.8",
+                "remote_port": 443,
+                "hostname": "bastion.example.com",
+                "allowed": False,         # would normally → "warning"
+                "nonstandard_port": False,
+                "trust_level": "known",
+                "downgrade": True,
+            },
+        )
+        alerts = engine.evaluate_security_event(event)
+        assert len(alerts) == 1
+        # Original level was "warning"; downgrade → "info".
+        assert alerts[0].level == "info"
+
+    def test_engine_blocked_keeps_critical(self, tmp_path):
+        """trust=blocked + downgrade=True is treated as no downgrade."""
+        engine = AlertEngine(DEFAULT_CONFIG)
+        event = SecurityEvent(
+            timestamp=datetime.now(),
+            source="net_tracker",
+            actor_pid=1234,
+            actor_name="ollama",
+            event_type="net_connect",
+            target="evil.example.com:4444",
+            detail={
+                "remote_ip": "5.6.7.8",
+                "remote_port": 4444,
+                "hostname": "evil.example.com",
+                "allowed": False,
+                "nonstandard_port": True,
+                # Even with downgrade=True the BLOCKED short-circuit must
+                # keep the alert at critical.
+                "trust_level": "blocked",
+                "downgrade": True,
+            },
+        )
+        alerts = engine.evaluate_security_event(event)
+        assert len(alerts) == 1
+        assert alerts[0].level == "critical"
