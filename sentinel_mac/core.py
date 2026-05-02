@@ -275,6 +275,11 @@ class Sentinel:
             fs_config = sec_config.get("fs_watcher", {})
             if fs_config.get("enabled", True):
                 self._fs_watcher = FSWatcher(self.config, self._security_queue)
+                # ADR 0002 §D3 — wire EventLogger so download joins can
+                # rewrite the JSONL line in-place. Cheap no-op when the
+                # download_tracking feature is disabled (the rewrite is
+                # only reached after a register_download() call).
+                self._fs_watcher.attach_event_logger(self._event_logger)
             net_config = sec_config.get("net_tracker", {})
             if net_config.get("enabled", True):
                 self._net_tracker = NetTracker(
@@ -413,6 +418,33 @@ class Sentinel:
             try:
                 event = self._security_queue.get_nowait()
                 self._event_logger.log(event)
+
+                # ADR 0002 §D3 — register agent_download events with the
+                # FSWatcher so a matching file_create/modify within the
+                # configured window will populate joined_fs_event on the
+                # JSONL line we just wrote. Skipped when no fs_watcher,
+                # the feature is disabled, or output_path is unknown
+                # (e.g., wget no-flag basename case).
+                if (
+                    event.event_type == "agent_download"
+                    and self._fs_watcher is not None
+                    and self._fs_watcher.download_tracking_enabled
+                ):
+                    output_path = event.detail.get("output_path")
+                    if isinstance(output_path, str) and os.path.isabs(
+                        os.path.expanduser(output_path)
+                    ):
+                        deadline = (
+                            int(time.time())
+                            + self._fs_watcher.join_window_seconds
+                        )
+                        self._fs_watcher.register_download(
+                            event_id=event.event_id,
+                            output_path=output_path,
+                            deadline_epoch=deadline,
+                            date=event.timestamp.date(),
+                        )
+
                 alerts = self.engine.evaluate_security_event(event)
                 for alert in alerts:
                     logging.warning(f"\U0001f6a8 [security] {alert.level}: {alert.title}")
