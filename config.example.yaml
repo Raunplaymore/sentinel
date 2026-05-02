@@ -120,6 +120,16 @@ security:
       mcp: true                          # MCP tool calls + injection detection
       typosquatting: true                # pip/npm install of mistyped names
 
+  # ── Download Tracking (v0.7, opt-in) ──
+  # Tracks AI agent downloads via curl / wget / git clone, joining the
+  # source URL with the resulting file (5-min window) for forensic context.
+  # Emits a new `agent_download` SecurityEvent (additive — the existing
+  # `agent_command` event continues to fire for `curl … | sh` and similar).
+  # See docs/decisions/0002-download-tracking.md.
+  download_tracking:
+    enabled: false              # opt-in
+    join_window_seconds: 300    # 5 min default (cap 1800 = 30 min)
+
   # ── Context-Aware Detection (v0.6, opt-in) ──
   # Reduces false positives by recognizing hosts you have explicitly
   # trusted (~/.ssh/known_hosts) or have repeatedly accessed.

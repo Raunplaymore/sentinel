@@ -15,11 +15,13 @@ import logging
 import os
 import queue
 import re
+import shlex
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from sentinel_mac.models import SecurityEvent
 from sentinel_mac.collectors.context import HostContext, TrustLevel
@@ -183,6 +185,407 @@ def _extract_ssh_host(command: str) -> Optional[str]:
     return None
 
 
+# ── ADR 0002: download extraction (curl / wget / git clone) ──────────
+# Conservative parser. Returns None when output_path / source_url cannot
+# be confidently identified. Recognized patterns (ADR 0002 §D4):
+#
+#   curl URL -o PATH | --output PATH | -O (basename of URL) | > PATH
+#   wget URL -O PATH | --output-document=PATH | (no flag → basename)
+#   git clone URL [TARGET]
+#
+# Out of scope (ADR 0002 §D4): pip download, brew fetch, aria2c, axel,
+# httpie, xh, bare shell redirects without curl/wget.
+
+_URL_RE = re.compile(r"https?://[^\s'\";|>&]+")
+
+# curl flags that take an argument (we skip the argument when scanning).
+_CURL_ARG_FLAGS: frozenset[str] = frozenset({
+    "-o", "--output",
+    "-X", "--request",
+    "-H", "--header",
+    "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
+    "-F", "--form",
+    "-u", "--user",
+    "-A", "--user-agent",
+    "-e", "--referer",
+    "-b", "--cookie",
+    "-c", "--cookie-jar",
+    "-K", "--config",
+    "--connect-timeout", "--max-time",
+    "--proxy", "-x",
+    "--cacert", "--cert", "--key",
+    "--retry", "--retry-delay", "--retry-max-time",
+    "-T", "--upload-file",
+    "--resolve",
+    "--range", "-r",
+})
+
+# curl long flags that already carry their value via `=` (split lazily).
+_CURL_NO_DOWNLOAD_METHODS: frozenset[str] = frozenset({
+    "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS",
+})
+
+
+def _basename_from_url(url: str) -> Optional[str]:
+    """Return the trailing path segment of ``url`` if it looks like a filename.
+
+    Strips query string + fragment, returns the last non-empty path
+    component or None when the URL has only a hostname.
+    """
+    try:
+        parsed = urlparse(url)
+    except (ValueError, TypeError):
+        return None
+    path = (parsed.path or "").rstrip("/")
+    if not path:
+        return None
+    base = path.rsplit("/", 1)[-1]
+    return base or None
+
+
+def _extract_url(tokens: list[str]) -> Optional[str]:
+    """Find the first http(s):// token in a tokenized command line."""
+    for tok in tokens:
+        if tok.startswith(("http://", "https://")):
+            return tok
+        # Some shells quote URLs; strip surrounding quotes.
+        stripped = tok.strip("'\"")
+        if stripped.startswith(("http://", "https://")):
+            return stripped
+    return None
+
+
+def _extract_curl_download(tokens: list[str]) -> Optional[dict]:
+    """Parse a tokenized curl command. Returns a download dict or None.
+
+    Only treats the invocation as a download when:
+    - A URL is present, AND
+    - Either ``-o PATH`` / ``--output PATH`` / ``-O`` is given, OR a shell
+      redirect ``> PATH`` follows the curl invocation (handled by caller).
+
+    HTTP methods other than implicit GET (``-X POST`` etc.) cause us to
+    return None — the request is probably not a download.
+    """
+    url: Optional[str] = None
+    output_path: Optional[str] = None
+    saw_dash_big_o = False
+    method_override: Optional[str] = None
+
+    i = 1  # skip leading "curl"
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in ("-o", "--output"):
+            if i + 1 < len(tokens):
+                output_path = tokens[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        if tok.startswith("--output="):
+            output_path = tok.split("=", 1)[1]
+            i += 1
+            continue
+        if tok == "-O" or tok == "--remote-name":
+            saw_dash_big_o = True
+            i += 1
+            continue
+        if tok in ("-X", "--request"):
+            if i + 1 < len(tokens):
+                method_override = tokens[i + 1].upper()
+                i += 2
+                continue
+            i += 1
+            continue
+        if tok.startswith("--request="):
+            method_override = tok.split("=", 1)[1].upper()
+            i += 1
+            continue
+        # Skip flags-with-args generically.
+        if tok in _CURL_ARG_FLAGS:
+            i += 2
+            continue
+        if tok.startswith(("http://", "https://")):
+            if url is None:
+                url = tok
+            i += 1
+            continue
+        # Bare flags we don't know — just skip without consuming next.
+        if tok.startswith("-"):
+            i += 1
+            continue
+        i += 1
+
+    if url is None:
+        return None
+
+    # Reject obvious non-download HTTP methods unless an explicit output
+    # flag was given (rare but technically possible — `curl -X POST -o
+    # response.json …`).
+    if (
+        method_override
+        and method_override in _CURL_NO_DOWNLOAD_METHODS
+        and output_path is None
+        and not saw_dash_big_o
+    ):
+        return None
+
+    if output_path is None and saw_dash_big_o:
+        output_path = _basename_from_url(url)
+
+    if output_path is None:
+        # Plain `curl URL` with no save flag — ADR 0002 §D4 says skip
+        # (curl prints to stdout by default; not a download).
+        return None
+
+    return {
+        "source_url": url,
+        "output_path": output_path,
+        "downloader": "curl",
+    }
+
+
+def _extract_wget_download(tokens: list[str]) -> Optional[dict]:
+    """Parse a tokenized wget command."""
+    url: Optional[str] = None
+    output_path: Optional[str] = None
+
+    i = 1  # skip leading "wget"
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in ("-O", "--output-document"):
+            if i + 1 < len(tokens):
+                output_path = tokens[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        if tok.startswith("--output-document="):
+            output_path = tok.split("=", 1)[1]
+            i += 1
+            continue
+        if tok.startswith(("http://", "https://")):
+            if url is None:
+                url = tok
+            i += 1
+            continue
+        if tok.startswith("-"):
+            # Some wget flags take args (`-P DIR`, `--directory-prefix=DIR`,
+            # `-e CMD`, `-O FILE`). We already handled -O. Be conservative:
+            # when a known short flag is followed by something that does
+            # not look like a URL or another flag, consume it.
+            if tok in {"-P", "-e", "-i", "-Q", "--quota", "--directory-prefix"}:
+                i += 2
+                continue
+            i += 1
+            continue
+        i += 1
+
+    if url is None:
+        return None
+
+    if output_path is None:
+        # ADR 0002 §D4: wget with no flag drops the file in cwd using the
+        # URL basename. We don't know cwd, so record only the basename.
+        output_path = _basename_from_url(url)
+
+    return {
+        "source_url": url,
+        "output_path": output_path,
+        "downloader": "wget",
+    }
+
+
+def _extract_git_clone_download(tokens: list[str]) -> Optional[dict]:
+    """Parse a tokenized git command. Only ``git clone …`` is recognized."""
+    if len(tokens) < 3 or tokens[0] != "git" or tokens[1] != "clone":
+        return None
+
+    url: Optional[str] = None
+    target: Optional[str] = None
+    positional: list[str] = []
+
+    i = 2
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("-"):
+            # Skip flag + (possibly) its argument. Be conservative: any
+            # `--foo=bar` is single token; `--depth 1` is two.
+            if "=" in tok:
+                i += 1
+                continue
+            # Known git clone flags that take an argument.
+            if tok in {
+                "--depth", "--branch", "-b", "--origin", "-o",
+                "--config", "-c", "--reference", "--separate-git-dir",
+                "--shallow-since", "--shallow-exclude", "--filter",
+                "-j", "--jobs", "--template", "--upload-pack", "-u",
+            }:
+                i += 2
+                continue
+            i += 1
+            continue
+        positional.append(tok)
+        i += 1
+
+    if not positional:
+        return None
+    url = positional[0]
+    if len(positional) >= 2:
+        target = positional[1]
+
+    if not url.startswith(("http://", "https://", "git://", "ssh://", "git@")):
+        # Local-path clone — not a download.
+        return None
+
+    if target is None:
+        # Default git behavior: directory = repo basename, stripping
+        # trailing ".git" if present.
+        base = _basename_from_url(url) if url.startswith(("http://", "https://")) else None
+        if base is None:
+            base = url.rsplit("/", 1)[-1] if "/" in url else url
+        if base.endswith(".git"):
+            base = base[:-4]
+        target = base or None
+
+    if target is None:
+        return None
+
+    return {
+        "source_url": url,
+        "output_path": target,
+        "downloader": "git",
+    }
+
+
+def _extract_redirect_path(command: str) -> Optional[str]:
+    """If the command ends with a `> PATH` redirect, return PATH.
+
+    Conservative: only considers a single `>` (not `>>`, `2>`, `&>`)
+    followed by a single token. Returns None for anything else.
+    """
+    # Strip trailing whitespace / semicolons.
+    stripped = command.rstrip().rstrip(";").rstrip()
+    # Match "  > path" at end. Reject ">>" by requiring no preceding ">".
+    m = re.search(r"(?<![>&\d])>\s*([^\s>&|]+)\s*$", stripped)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _extract_download(command: str) -> Optional[dict]:
+    """Top-level download extractor (ADR 0002 §D4).
+
+    Returns a dict with keys ``source_url``, ``output_path``, ``downloader``
+    when ``command`` is recognized as a curl / wget / git clone download.
+    Returns None for non-download commands or when extraction is ambiguous.
+    """
+    if not command or not command.strip():
+        return None
+
+    # Only inspect the first command in a pipeline / sequence: we look at
+    # the leading subexpression up to the first unquoted `|`, `&&`, `;`.
+    # For robustness against malformed input, fall back to the raw command
+    # if shlex fails.
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+
+    leader = tokens[0].lower()
+
+    # Strip a possible trailing pipeline. We only want the first segment's
+    # tokens — anything past `|` belongs to a downstream tool (e.g. `… | sh`).
+    try:
+        pipe_idx = tokens.index("|")
+        first_tokens = tokens[:pipe_idx]
+    except ValueError:
+        first_tokens = tokens
+
+    if not first_tokens:
+        return None
+    leader = first_tokens[0].lower()
+
+    if leader == "curl":
+        result = _extract_curl_download(first_tokens)
+        if result is not None and result["output_path"] is None:
+            # Try shell redirect on the original command.
+            redirect = _extract_redirect_path(command)
+            if redirect:
+                result["output_path"] = redirect
+            else:
+                return None
+        if result is None:
+            # No -o / -O / --output. Try shell redirect: `curl URL > file`.
+            redirect = _extract_redirect_path(command)
+            if redirect:
+                url = _extract_url(first_tokens)
+                if url:
+                    return {
+                        "source_url": url,
+                        "output_path": redirect,
+                        "downloader": "curl",
+                    }
+        return result
+
+    if leader == "wget":
+        return _extract_wget_download(first_tokens)
+
+    if leader == "git":
+        return _extract_git_clone_download(first_tokens)
+
+    return None
+
+
+def _evaluate_download_risk(
+    download: dict,
+    host_ctx: "HostContext",
+    *,
+    is_path_sensitive: bool,
+) -> tuple[float, str, bool]:
+    """Score a download and produce its trust label + high_risk flag.
+
+    Returns ``(risk_score, trust_label, high_risk)`` per ADR 0002 §D5:
+        - sensitive output_path                   → 0.9 (critical)
+        - host BLOCKED                            → 0.5 (warning)
+        - host UNKNOWN (not KNOWN, not LEARNED)   → 0.5 (warning)
+        - host KNOWN / LEARNED                    → 0.2 (info)
+        - sensitive AND BLOCKED                   → 0.9 (critical)
+
+    ``high_risk`` mirrors warning-or-above (>= 0.5). Trust is computed
+    against the URL host.
+    """
+    from sentinel_mac.collectors.context import TrustLevel
+
+    url = download.get("source_url", "")
+    host = ""
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+    except (ValueError, TypeError):
+        host = ""
+
+    trust: "TrustLevel"
+    if host:
+        host_ctx.observe(host)
+        trust = host_ctx.classify(host)
+    else:
+        trust = TrustLevel.UNKNOWN
+    trust_label = trust.value
+
+    if is_path_sensitive:
+        # Sensitive-path always trumps host trust (ADR 0002 §D5).
+        return 0.9, trust_label, True
+
+    if trust == TrustLevel.BLOCKED:
+        return 0.5, trust_label, True
+    if trust in (TrustLevel.KNOWN, TrustLevel.LEARNED):
+        return 0.2, trust_label, False
+    # UNKNOWN
+    return 0.5, trust_label, True
+
+
 # MCP injection patterns — detect prompt injection in MCP tool responses
 MCP_INJECTION_PATTERNS = [
     (re.compile(r"<system>|</system>", re.IGNORECASE), "system tag injection"),
@@ -251,6 +654,14 @@ class AgentLogParser:
         self._rule_web_fetch = bool(rules_config.get("web_fetch", True))
         self._rule_mcp = bool(rules_config.get("mcp", True))
         self._rule_typosquatting = bool(rules_config.get("typosquatting", True))
+
+        # ADR 0002 — download tracking (opt-in). When disabled, download
+        # extraction is skipped entirely so the curl/wget regex work is
+        # not paid on every Bash command.
+        download_cfg = (
+            config.get("security", {}).get("download_tracking", {}) or {}
+        )
+        self._download_enabled = bool(download_cfg.get("enabled", False))
 
         # Track file positions for tail-f style reading
         # Key: file path, Value: last read position
@@ -509,7 +920,57 @@ class AgentLogParser:
             ))
             break  # One match is enough
 
+        # ADR 0002 §D1: in addition to (not in place of) any agent_command
+        # event, emit an agent_download event when the command is a
+        # recognized download invocation. Two events for one command is
+        # intentional — they have distinct semantics.
+        if self._download_enabled:
+            download_event = self._maybe_emit_download(command, timestamp)
+            if download_event is not None:
+                events.append(download_event)
+
         return events
+
+    def _maybe_emit_download(
+        self, command: str, timestamp: datetime
+    ) -> Optional[SecurityEvent]:
+        """Build an ``agent_download`` SecurityEvent if ``command`` is a
+        recognized download (curl / wget / git clone). Returns None when
+        not a download or when extraction was inconclusive.
+        """
+        download = _extract_download(command)
+        if download is None:
+            return None
+
+        output_path = download.get("output_path")
+        is_path_sensitive = bool(
+            output_path and _is_sensitive_path(output_path)
+        )
+        risk_score, trust_label, high_risk = _evaluate_download_risk(
+            download, self._host_ctx, is_path_sensitive=is_path_sensitive,
+        )
+
+        # ADR 0002 §D2 — frozen detail key set (additive only).
+        detail: dict = {
+            "source_url": download["source_url"],
+            "output_path": output_path,
+            "downloader": download["downloader"],
+            "command": command[:500],
+            "high_risk": high_risk,
+            "trust_level": trust_label,
+            "joined_fs_event": None,
+        }
+
+        return SecurityEvent(
+            timestamp=timestamp,
+            source="agent_log",
+            actor_pid=0,
+            actor_name="claude_code",
+            event_type="agent_download",
+            target=download["source_url"],
+            detail=detail,
+            risk_score=risk_score,
+        )
 
     def _check_typosquatting(self, command: str,
                              timestamp: datetime) -> list[SecurityEvent]:
