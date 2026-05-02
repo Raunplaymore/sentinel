@@ -37,7 +37,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "ruff>=0.5", "mypy>=1.8"]
 app = ["rumps>=0.4.0,<1", "ruamel.yaml>=0.18,<1"]
 
 [project.urls]
@@ -55,3 +55,55 @@ include = ["sentinel_mac*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py38"
+
+[tool.ruff.lint]
+# Conservative starter set — enable more in v0.8 (E, F, W, I만 켬, 나머지는 v0.8 backlog)
+select = ["E", "F", "W", "I"]
+# Existing code may have long lines and bare-except; don't break HEAD on entry.
+# Re-evaluate in v0.8 with a ratchet PR.
+ignore = ["E501", "E722", "E741"]
+
+[tool.ruff.lint.per-file-ignores]
+# tests/* sometimes import after path manipulation, and several legacy test
+# files have unused fixtures/imports that pre-date ruff. Tracked for cleanup
+# in v0.8 (see CHANGELOG Tooling note).
+"tests/*" = ["E402", "I001", "F401", "F841"]
+# Existing collectors / core / engine modules pre-date ruff. Track A & B
+# (v0.6) own these files and have parallel PRs in flight, so Track C does not
+# touch them. v0.8 ratchet PR will sort imports and drop unused names.
+"sentinel_mac/collectors/*.py" = ["I001", "F401"]
+"sentinel_mac/core.py" = ["I001", "F541"]
+"sentinel_mac/engine.py" = ["I001", "F841"]
+"sentinel_mac/models.py" = ["I001"]
+"sentinel_mac/notifier.py" = ["I001"]
+"sentinel_mac/menubar_app.py" = ["I001"]
+
+[tool.mypy]
+# requires-python is 3.8, but mypy 1.20 dropped 3.8 support. CI matrix runs
+# 3.9–3.13, so we type-check against the lowest CI Python.
+python_version = "3.9"
+ignore_missing_imports = true
+check_untyped_defs = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+# `requests` ships its own types since 2.32 but on older installs mypy still
+# flags `import-untyped`; ignore_missing_imports does not suppress it. Drop
+# this when CI baseline pins types-requests.
+disable_error_code = ["import-untyped"]
+# Strict mode is a v0.8 ratchet. Keep this lenient for now.
+
+# Existing collectors / core / menubar_app pre-date type-checking. Track A & B
+# (v0.6) own these files and have parallel PRs in flight, so Track C does not
+# touch them. v0.8 ratchet PR will tighten these.
+[[tool.mypy.overrides]]
+module = [
+    "sentinel_mac.core",
+    "sentinel_mac.menubar_app",
+    "sentinel_mac.collectors.agent_log_parser",
+    "sentinel_mac.collectors.fs_watcher",
+]
+ignore_errors = true

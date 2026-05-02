@@ -25,6 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   pairing) — moved to v0.7 as a side-track of the `--report` filter
   expansion (see ADR 0001 D5).
 
+### Tooling
+- Added `ruff` lint (lenient: `E`, `F`, `W`, `I` only; stricter rules
+  ratcheted up in v0.8) and `mypy` type check (lenient: ignore_missing_imports,
+  check_untyped_defs=false). Both run in CI on Python 3.9–3.13 matrix.
+
+### Documentation
+- Added "Privacy & Data" section to README.md and README_KR.md documenting
+  exactly what Sentinel watches, what it writes to disk, and what leaves
+  the machine (nothing by default — opt-in notification channels only).
+
 ## [0.5.3] - 2026-04-30
 
 ### Added
