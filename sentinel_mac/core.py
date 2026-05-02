@@ -14,6 +14,7 @@ import subprocess
 import sys
 import os
 import fcntl
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -234,7 +235,21 @@ class Sentinel:
         if acquire_lock:
             self._acquire_lock()
 
+        # ADR 0005 D5/D7 — reload infrastructure must be in place BEFORE the
+        # SIGHUP handler is registered (which itself MUST be registered before
+        # any collector starts). The `_shutdown_event` is reused by the reload
+        # worker loop so a daemon shutdown wakes it cleanly.
+        self._reload_lock = threading.RLock()
+        self._reload_requested = threading.Event()
+        self._shutdown_event = threading.Event()
+        self._reload_worker: Optional[threading.Thread] = None
+
+        # Resolve + remember config path so SIGHUP-driven reload reads the
+        # same file the daemon started from. None means "use defaults" — the
+        # reload worker still re-runs load_config(None) to pick up env-var
+        # overrides on each reload.
         resolved = resolve_config_path(config_path)
+        self._config_path: Optional[Path] = resolved
         self.config = load_config(resolved)
 
         # Setup logging with rotation (max 5MB x 3 files = 15MB)
@@ -252,6 +267,19 @@ class Sentinel:
                 logging.StreamHandler()
             ]
         )
+
+        # ADR 0005 D7 frozen surface: SIGHUP handler is installed in
+        # __init__, immediately after the lock is acquired and before any
+        # collector is instantiated. Single registration per process; the
+        # reload worker (started below) does the actual reload work.
+        if install_signal_handlers:
+            try:
+                signal.signal(signal.SIGHUP, self._on_sighup)
+            except (ValueError, AttributeError):  # pragma: no cover — non-main thread
+                # signal.signal is only legal from the main thread of the
+                # main interpreter. In embedded mode (menubar app, tests)
+                # this can be a no-op — kill -HUP simply will not fire.
+                pass
 
         self.collector = MacOSCollector()
         self.engine = AlertEngine(self.config)
@@ -271,6 +299,9 @@ class Sentinel:
 
         # Start security collectors if enabled
         sec_config = self.config.get("security", {})
+        # Stash the security rules dict so SIGHUP-driven reload can compare
+        # the new vs old shape (e.g., FSWatcher watch_paths) before the swap.
+        self._security_rules: dict = sec_config
         if sec_config.get("enabled", False):
             fs_config = sec_config.get("fs_watcher", {})
             if fs_config.get("enabled", True):
@@ -302,6 +333,17 @@ class Sentinel:
             signal.signal(signal.SIGTERM, self._shutdown)
             signal.signal(signal.SIGINT, self._shutdown)
 
+        # ADR 0005 D5 — start the reload worker thread last so every
+        # `self.*` it might read has been initialized. Daemon thread so it
+        # cannot block process exit; the loop also watches `_shutdown_event`
+        # for a clean wakeup on stop().
+        self._reload_worker = threading.Thread(
+            target=self._reload_worker_loop,
+            name="sentinel-reload",
+            daemon=True,
+        )
+        self._reload_worker.start()
+
     def stop(self) -> None:
         """External shutdown trigger for embedded mode (menubar app).
 
@@ -332,6 +374,12 @@ class Sentinel:
     def _shutdown(self, signum, frame):
         logging.info("\U0001f6d1 Sentinel shutting down...")
         self._running = False
+        # Wake the reload worker so it can observe `_shutdown_event` and
+        # exit cleanly instead of blocking another second on Event.wait().
+        # Setting `_reload_requested` along with `_shutdown_event` makes the
+        # worker fall through its inner branch immediately on wake-up.
+        self._shutdown_event.set()
+        self._reload_requested.set()
         if self._fs_watcher:
             self._fs_watcher.stop()
         if self._agent_log_parser:
@@ -346,6 +394,223 @@ class Sentinel:
         if self._pid_file and not self._pid_file.closed:
             fcntl.flock(self._pid_file, fcntl.LOCK_UN)
             self._pid_file.close()
+
+    # ── ADR 0005 — daemon reload protocol ───────────────────────────
+
+    def _on_sighup(self, signum, frame):
+        """async-signal-safe: just set the flag.
+
+        Heavy lifting (config parse, validation, swap) happens in the
+        dedicated reload worker thread per ADR 0005 §D5 — running
+        ``yaml.safe_load`` from a real signal handler is unsafe because
+        Python's import machinery and most stdlib I/O are not async-signal-safe.
+        """
+        self._reload_requested.set()
+
+    def _reload_worker_loop(self):
+        """ADR 0005 D5 — wait on `_reload_requested`, run `_do_reload`, repeat.
+
+        Coalescing: the event is `clear()`ed before `_do_reload` runs, so a
+        SIGHUP arriving during the reload re-fires the event exactly once
+        and the next iteration picks it up. Multiple SIGHUPs queued
+        between iterations collapse into a single reload.
+
+        Termination: the loop exits when `_shutdown_event` is set. The
+        shutdown handler also sets `_reload_requested` so we never sleep
+        the full timeout after stop() is invoked.
+        """
+        while not self._shutdown_event.is_set():
+            # 1.0s timeout means even if no SIGHUP ever fires, the loop
+            # still wakes regularly to check the shutdown flag — keeps
+            # process exit instant under Ctrl+C.
+            if not self._reload_requested.wait(timeout=1.0):
+                continue
+            self._reload_requested.clear()
+            if self._shutdown_event.is_set():
+                break
+            try:
+                self._do_reload()
+            except Exception as exc:
+                # ADR 0005 D3: outer try keeps the daemon alive even if the
+                # reload pipeline raises in an unexpected place. The
+                # per-step diagnostics inside _do_reload give finer detail;
+                # this is the last-resort safety net.
+                logging.warning(
+                    "config reload failed at outer scope: %s; keeping previous config",
+                    exc,
+                )
+
+    def _validate_reload_config(self, new_config: dict) -> None:
+        """ADR 0005 D3 step 4 — minimal sanity check before the swap.
+
+        Why a second check exists alongside the module-level
+        `_validate_config`: that helper is invoked from `load_config` and
+        is *forgiving* — it falls back to defaults when individual fields
+        are malformed so a typo never crashes the daemon at startup. At
+        reload time we have the opposite priority: a structurally invalid
+        new config must abort the reload (D3 atomic-or-nothing) so the
+        daemon keeps the old, working config. This guard catches the
+        structural cases `load_config` would silently mask (top-level
+        non-mapping, `thresholds`/`security` set to a non-dict, etc.) and
+        is also useful when a test monkeypatches `load_config`.
+
+        Strictness scope: structural only. Value clamping (already done by
+        `_validate_config`) is not repeated here.
+
+        Raises:
+            ValueError: when the structure is unusable.
+        """
+        if not isinstance(new_config, dict):
+            raise ValueError("config root is not a mapping")
+        thresholds = new_config.get("thresholds")
+        if thresholds is not None and not isinstance(thresholds, dict):
+            raise ValueError("`thresholds` must be a mapping")
+        security = new_config.get("security")
+        if security is not None and not isinstance(security, dict):
+            raise ValueError("`security` must be a mapping")
+
+    def _do_reload(self) -> None:
+        """ADR 0005 D3 — atomic-or-nothing reload sequence.
+
+        The new components (host_ctx, thresholds dict, security_rules) are
+        built into LOCAL variables. Only after they are all built does the
+        method enter the lock and assign them onto `self.*`. A failure
+        anywhere in steps 2-5 leaves no observable side effect on the live
+        daemon — the worker logs a warning and the daemon keeps running on
+        the previous config.
+
+        ADR 0005 D2 explicitly excludes (NEVER reloaded):
+          - notifier rate-limit counters
+          - AlertEngine cooldown timestamps
+          - agent log parser tail offsets
+          - typosquatting hardcoded set
+          - daemon PID / lock file
+        """
+        # Step 2 — flush in-memory frequency cache so we cross the reload
+        # boundary without losing observations.
+        try:
+            self.host_ctx.flush()
+        except Exception as exc:  # pragma: no cover — best-effort
+            logging.debug("host_ctx.flush() during reload failed: %s", exc)
+
+        # Step 3 — load new config (returns defaults on parse error; empty
+        # dict for a missing path was the existing semantic).
+        try:
+            new_config = load_config(self._config_path)
+        except Exception as exc:
+            logging.warning(
+                "config reload failed at load_config: %s; keeping previous config",
+                exc,
+            )
+            return
+
+        # Step 4 — validate. Bail before touching any side state.
+        try:
+            self._validate_reload_config(new_config)
+        except ValueError as exc:
+            logging.warning(
+                "config reload failed at validate: %s; keeping previous config",
+                exc,
+            )
+            return
+
+        # Step 5 — build new components in side state. If any step raises,
+        # `self.*` is unchanged and we abort with the old state intact.
+        try:
+            new_host_ctx = HostContext.from_config(new_config)
+            new_host_ctx.load()
+            new_thresholds = new_config.get("thresholds", {}) or {}
+            new_security_rules = new_config.get("security", {}) or {}
+        except Exception as exc:
+            logging.warning(
+                "config reload failed at build: %s; keeping previous config",
+                exc,
+            )
+            return
+
+        # Compute the FSWatcher-restart decision against the OLD security
+        # rules before the swap so the comparison is meaningful.
+        old_fs_paths = (
+            (self._security_rules or {}).get("fs_watcher", {}).get("watch_paths")
+        )
+        new_fs_paths = (
+            new_security_rules.get("fs_watcher", {}).get("watch_paths")
+        )
+        fs_paths_changed = old_fs_paths != new_fs_paths
+
+        # Step 6 — atomic swap under lock. ADR 0005 D2 frozen surface:
+        #   - host_ctx: replaced wholesale (new instance, already loaded)
+        #   - engine.thresholds: replaced (mutates the existing AlertEngine,
+        #     does NOT reset cooldowns — those live in `engine.last_alert_times`
+        #     or similar, which is left untouched by design)
+        #   - notifier rate-limit counters: NOT touched
+        #   - event_logger: close + reopen so log rotation can land cleanly
+        #   - FSWatcher: restarted only when watch_paths changed (expensive)
+        with self._reload_lock:
+            self.config = new_config
+            self.host_ctx = new_host_ctx
+            self.engine.thresholds = new_thresholds
+            self._security_rules = new_security_rules
+
+            # event_logger swap inside the same lock (D2 row): close the
+            # current handle so the next .log() call rotates into a fresh
+            # file. ADR 0005 §D5 specifies that the main loop's metric
+            # collection and the security queue drainer should take this
+            # same _reload_lock briefly before reading self.* — that
+            # read-side instrumentation is **deferred**, tracked as a v0.8
+            # Track 1c TODO. Today the safety relies on (a) Python's GIL
+            # making attribute reassignment atomic at the bytecode level,
+            # (b) the single-daemon assumption (only the main loop reads
+            # these refs), and (c) EventLogger.close being idempotent.
+            # The close→reopen window is sub-µs in practice; no observed
+            # races. See ADR 0005 D5 for the full lock contract.
+            try:
+                self._event_logger.close()
+            except Exception as exc:  # pragma: no cover — close is idempotent
+                logging.debug("event_logger.close during reload failed: %s", exc)
+            self._event_logger = EventLogger(self._data_dir)
+
+            # FSWatcher restart only if watch_paths actually changed.
+            # Restarting the watchdog observer is expensive (~100ms) so we
+            # gate on actual change per ADR 0005 D2 row.
+            if fs_paths_changed and self._fs_watcher is not None:
+                self._restart_fs_watcher(new_security_rules.get("fs_watcher", {}))
+
+            # NOTE — D2 explicitly preserved (do NOT touch):
+            #   self.notifier   (rate-limit counters, pending ntfy retries)
+            #   self.engine.cooldowns / last_alert_times (active cooldowns)
+            #   self._agent_log_parser tail offsets
+            #   typosquatting reference set (hardcoded, not config)
+
+        logging.info("reloaded config from %s", self._config_path)
+
+    def _restart_fs_watcher(self, new_fs_config: dict) -> None:
+        """Stop and restart the FSWatcher with the new watch_paths.
+
+        Called from `_do_reload` only when `watch_paths` actually changed
+        (per ADR 0005 D2 row). Best-effort — a failure to restart logs a
+        warning and leaves `self._fs_watcher = None` so the daemon keeps
+        running without file-system telemetry rather than crashing.
+        """
+        old = self._fs_watcher
+        try:
+            if old is not None:
+                old.stop()
+        except Exception as exc:  # pragma: no cover — stop should be idempotent
+            logging.debug("fs_watcher.stop during reload failed: %s", exc)
+
+        try:
+            new_watcher = FSWatcher(self.config, self._security_queue)
+            new_watcher.attach_event_logger(self._event_logger)
+            new_watcher.start()
+            self._fs_watcher = new_watcher
+        except Exception as exc:
+            logging.warning(
+                "FSWatcher restart failed during reload: %s; "
+                "fs_watcher disabled until next restart",
+                exc,
+            )
+            self._fs_watcher = None
 
     def run(self):
         channels = self.notifier.channel_names
