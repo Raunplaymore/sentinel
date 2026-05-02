@@ -503,13 +503,15 @@ class TestAgentLogParserDownloadEmission:
         assert downloads[0].detail["trust_level"] == "blocked"
 
     def test_agent_download_detail_keys_verbatim(self):
-        """ADR 0002 §D2 freeze guard.
+        """ADR 0002 §D2 freeze guard (with ADR 0007 D2+D3 extensions).
 
-        The seven keys here are FROZEN by ADR 0002. Adding a key is
-        allowed (additive — ADR 0004 §D3) but removing or renaming any
-        of these requires a superseding ADR. If this test fails after a
-        change to agent_log_parser, you almost certainly broke a
-        downstream consumer (--report --json, future Pro tooling).
+        The original seven keys are FROZEN by ADR 0002. ADR 0007 D5
+        added two more (``session``, ``project_meta``) per the additive
+        rule of ADR 0004 §D3. Adding further keys is allowed (additive)
+        but removing or renaming any of these requires a superseding ADR.
+        If this test fails after a change to agent_log_parser, you almost
+        certainly broke a downstream consumer (--report --json, future
+        Pro tooling).
         """
         parser, q = self._make_parser(enabled=True)
         parser.parse_line(self._make_tool_use_line(
@@ -522,8 +524,11 @@ class TestAgentLogParserDownloadEmission:
         assert len(downloads) == 1
         keys = set(downloads[0].detail.keys())
         frozen = {
+            # ADR 0002 §D2 — original seven.
             "source_url", "output_path", "downloader",
             "command", "high_risk", "trust_level", "joined_fs_event",
+            # ADR 0007 D2+D3 — additive forensic context.
+            "session", "project_meta",
         }
         # Equality, not subset: detect both removed AND silently-added keys.
         assert keys == frozen, (

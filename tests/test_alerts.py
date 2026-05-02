@@ -471,3 +471,200 @@ class TestAgentDownloadAlerts:
         assert "https://evil.example.com/dropper.sh" in msg
         assert "/tmp/dropper.sh" in msg
         assert "wget" in msg
+
+
+# ─── ADR 0007 D6 — [ctx] block formatting ─────────────────────────
+
+
+class TestCtxBlockFormatting:
+    """Direct unit tests for ``_format_ctx_block`` covering every path."""
+
+    def test_returns_empty_when_both_session_and_project_null(self):
+        from sentinel_mac.engine import _format_ctx_block
+        assert _format_ctx_block({}) == ""
+        assert _format_ctx_block({
+            "session": None, "project_meta": None,
+        }) == ""
+        assert _format_ctx_block({
+            "session": {"id": None, "model": None, "version": None, "cwd": None},
+            "project_meta": None,
+        }) == ""
+
+    def test_project_only_emits_project_line(self):
+        from sentinel_mac.engine import _format_ctx_block
+        block = _format_ctx_block({
+            "project_meta": {
+                "name": "myproj", "root": "/x",
+                "git": {"branch": "main", "head": "abc12345", "remote": "foo/bar"},
+            },
+        })
+        assert "Project: myproj (main @ abc12345)" in block
+        # D7 — git.remote MUST NOT appear in user-visible message.
+        assert "foo/bar" not in block
+
+    def test_session_only_emits_session_and_where_lines(self):
+        from sentinel_mac.engine import _format_ctx_block
+        block = _format_ctx_block({
+            "session": {
+                "id": "abc-uuid-12345678",
+                "model": "claude-opus-4-7",
+                "version": "2.1.123",
+                "cwd": "/tmp/somewhere",
+            },
+        })
+        assert "Session: claude-opus-4-7 #abc-uuid (CC 2.1.123)" in block
+        assert "Where:   /tmp/somewhere" in block
+        # No project_meta in detail → no Project: line.
+        assert "Project:" not in block
+
+    def test_all_four_lines_render(self):
+        from sentinel_mac.engine import _format_ctx_block
+        block = _format_ctx_block({
+            "session": {
+                "id": "abc-uuid-12345678",
+                "model": "claude-opus-4-7",
+                "version": "2.1.123",
+                "cwd": "/tmp/somewhere",
+            },
+            "project_meta": {
+                "name": "myproj", "root": "/x",
+                "git": {"branch": "main", "head": "abc12345"},
+            },
+            "command": "pip install requets",
+        })
+        lines = block.strip().splitlines()
+        assert len(lines) == 4
+        assert lines[0].strip().startswith("Project:")
+        assert lines[1].strip().startswith("Session:")
+        assert lines[2].strip().startswith("Where:")
+        assert lines[3].strip().startswith("What:")
+
+    def test_cwd_under_home_uses_tilde(self):
+        from sentinel_mac.engine import _format_ctx_block
+        from pathlib import Path
+        home = str(Path.home())
+        block = _format_ctx_block({
+            "session": {
+                "id": "abc", "model": "m", "version": "v",
+                "cwd": home + "/some/sub",
+            },
+        })
+        assert "Where:   ~/some/sub" in block
+        assert home not in block
+
+    def test_long_command_truncated_with_ellipsis(self):
+        from sentinel_mac.engine import _format_ctx_block
+        long_cmd = "x" * 200
+        block = _format_ctx_block({"command": long_cmd})
+        # 80-char cap with `…` suffix per D6 macOS-tightened rule.
+        what_line = [
+            ln for ln in block.splitlines() if ln.strip().startswith("What:")
+        ][0]
+        # Strip indent + "What:    " prefix.
+        rendered = what_line.split("What:", 1)[1].strip()
+        assert len(rendered) == 80
+        assert rendered.endswith("…")
+
+    def test_branch_only_no_head(self):
+        from sentinel_mac.engine import _format_ctx_block
+        block = _format_ctx_block({
+            "project_meta": {
+                "name": "myproj",
+                "git": {"branch": "main", "head": None},
+            },
+        })
+        assert "Project: myproj (main)" in block
+        assert "@" not in block.split("Project:")[1].split("\n")[0]
+
+    def test_no_git_just_name(self):
+        from sentinel_mac.engine import _format_ctx_block
+        block = _format_ctx_block({
+            "project_meta": {"name": "myproj", "git": None},
+        })
+        assert "Project: myproj" in block
+        assert "(" not in block.split("Project:")[1].split("\n")[0]
+
+    def test_remote_omitted_from_user_visible_block(self):
+        """ADR 0007 D7 privacy boundary — git.remote stays in audit log
+        only and MUST NEVER surface in the rendered alert text."""
+        from sentinel_mac.engine import _format_ctx_block
+        block = _format_ctx_block({
+            "project_meta": {
+                "name": "secret-proj",
+                "git": {
+                    "branch": "main", "head": "deadbeef",
+                    "remote": "owner/private-repo",
+                },
+            },
+        })
+        assert "owner/private-repo" not in block
+        assert "remote" not in block.lower()
+
+
+class TestAlertMessageWithCtxBlock:
+    """End-to-end — the engine's evaluate_security_event appends the
+    [ctx] block to every Alert it produces from a SecurityEvent."""
+
+    def test_typosquatting_alert_carries_ctx_block(self):
+        engine = AlertEngine(DEFAULT_CONFIG)
+        event = SecurityEvent(
+            timestamp=datetime.now(),
+            source="agent_log",
+            actor_pid=0,
+            actor_name="claude_code",
+            event_type="typosquatting_suspect",
+            target="requets",
+            detail={
+                "command": "pip install requets",
+                "ecosystem": "pip",
+                "similar_to": "requests",
+                "confidence": "high",
+                "session": {
+                    "id": "abc-uuid-12345678",
+                    "model": "claude-opus-4-7",
+                    "version": "2.1.123",
+                    "cwd": "/Users/x/proj",
+                },
+                "project_meta": {
+                    "name": "myproj", "root": "/Users/x/proj",
+                    "git": {"branch": "main", "head": "abc12345"},
+                },
+            },
+        )
+        alerts = engine.evaluate_security_event(event)
+        assert len(alerts) == 1
+        msg = alerts[0].message
+        # Existing alert text preserved (regression: substring check).
+        assert "requets" in msg
+        assert "requests" in msg
+        # New [ctx] block appended.
+        assert "Project: myproj (main @ abc12345)" in msg
+        assert "Session: claude-opus-4-7" in msg
+        assert "What:    pip install requets" in msg
+
+    def test_alert_unchanged_when_ctx_fields_empty(self):
+        engine = AlertEngine(DEFAULT_CONFIG)
+        # Same event minus session + project_meta — alert must not gain
+        # a [ctx] block, only the original text.
+        event = SecurityEvent(
+            timestamp=datetime.now(),
+            source="agent_log",
+            actor_pid=0,
+            actor_name="claude_code",
+            event_type="typosquatting_suspect",
+            target="requets",
+            detail={
+                "command": "pip install requets",
+                "ecosystem": "pip",
+                "similar_to": "requests",
+                "confidence": "high",
+            },
+        )
+        alerts = engine.evaluate_security_event(event)
+        msg = alerts[0].message
+        # `command` alone produces a What: line (it's still in detail).
+        assert "What:    pip install requets" in msg
+        # But neither Project: nor Session: line.
+        assert "Project:" not in msg
+        assert "Session:" not in msg
+

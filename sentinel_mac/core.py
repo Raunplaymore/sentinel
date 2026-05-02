@@ -25,6 +25,7 @@ from logging.handlers import RotatingFileHandler
 from sentinel_mac.models import SystemMetrics, Alert, SecurityEvent  # noqa: F401
 from sentinel_mac.collectors.system import MacOSCollector  # noqa: F401
 from sentinel_mac.collectors.context import HostContext  # noqa: F401
+from sentinel_mac.collectors.project_context import ProjectContext  # noqa: F401
 from sentinel_mac.collectors.fs_watcher import FSWatcher  # noqa: F401
 from sentinel_mac.collectors.net_tracker import NetTracker  # noqa: F401
 from sentinel_mac.collectors.agent_log_parser import AgentLogParser  # noqa: F401
@@ -297,6 +298,13 @@ class Sentinel:
         self.host_ctx = HostContext.from_config(self.config)
         self.host_ctx.load()
 
+        # ADR 0007 D4 — single ProjectContext shared across collectors
+        # that enrich events with project_meta (agent_log_parser +
+        # fs_watcher; net_tracker is excluded per D5). Mirrors the
+        # HostContext injection pattern from ADR 0001. No .load() call —
+        # ProjectContext is lazy; first lookup populates the cache.
+        self.project_ctx = ProjectContext.from_config(self.config)
+
         # Start security collectors if enabled
         sec_config = self.config.get("security", {})
         # Stash the security rules dict so SIGHUP-driven reload can compare
@@ -305,7 +313,10 @@ class Sentinel:
         if sec_config.get("enabled", False):
             fs_config = sec_config.get("fs_watcher", {})
             if fs_config.get("enabled", True):
-                self._fs_watcher = FSWatcher(self.config, self._security_queue)
+                self._fs_watcher = FSWatcher(
+                    self.config, self._security_queue,
+                    project_ctx=self.project_ctx,
+                )
                 # ADR 0002 §D3 — wire EventLogger so download joins can
                 # rewrite the JSONL line in-place. Cheap no-op when the
                 # download_tracking feature is disabled (the rewrite is
@@ -313,6 +324,10 @@ class Sentinel:
                 self._fs_watcher.attach_event_logger(self._event_logger)
             net_config = sec_config.get("net_tracker", {})
             if net_config.get("enabled", True):
+                # ADR 0007 D5 — net_tracker intentionally NOT given a
+                # project_ctx (per-connection cwd would require
+                # lsof -p <pid> -d cwd per emitted event; perf cost
+                # unacceptable for a high-frequency stream).
                 self._net_tracker = NetTracker(
                     self.config, self._security_queue,
                     host_ctx=self.host_ctx,
@@ -322,6 +337,7 @@ class Sentinel:
                 self._agent_log_parser = AgentLogParser(
                     self.config, self._security_queue,
                     host_ctx=self.host_ctx,
+                    project_ctx=self.project_ctx,
                 )
 
         self.interval = self.config.get("check_interval_seconds", 30)
