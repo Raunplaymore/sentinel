@@ -417,6 +417,13 @@ class AlertEngine:
             similar_to = event.detail.get("similar_to", "?")
             confidence = event.detail.get("confidence", "medium")
             ecosystem = event.detail.get("ecosystem", "")
+            # NOTE (v0.8 defect fix): collector
+            # (agent_log_parser._check_typosquatting) now sets risk_score
+            # before the JSONL audit write so audit-log severity matches
+            # the alert. We re-assert the same mapping here idempotently
+            # for backward compatibility — engine remains the source of
+            # the alert level, collector is the source of the persisted
+            # score, and the two stay in lockstep.
             event.risk_score = 0.9 if confidence == "high" else 0.6
             level = "critical" if confidence == "high" else "warning"
             alerts.append(Alert(
