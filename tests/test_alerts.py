@@ -377,3 +377,97 @@ class TestTrustDowngrade:
         alerts = engine.evaluate_security_event(event)
         assert len(alerts) == 1
         assert alerts[0].level == "info"
+
+
+# ─── agent_download dispatch (ADR 0002 §D5) ───
+
+
+class TestAgentDownloadAlerts:
+    """AlertEngine routes agent_download events to user-facing alerts.
+
+    Regression coverage for PR #12 follow-up: the parser already sets
+    risk_score (0.9 / 0.5 / 0.2) per the §D5 matrix; the engine MUST map
+    that score to a critical / warning / info Alert so the macOS
+    notification channel actually fires. Before the fix, agent_download
+    events landed in JSONL + --report only, never reaching the user.
+    """
+
+    def _make_engine(self):
+        return AlertEngine(DEFAULT_CONFIG)
+
+    def _download_event(self, *, risk_score, **detail_overrides):
+        detail = {
+            "source_url": "https://example.com/payload.tar.gz",
+            "output_path": "/tmp/payload.tar.gz",
+            "downloader": "curl",
+            "command": "curl -L https://example.com/payload.tar.gz -o /tmp/payload.tar.gz",
+            "high_risk": risk_score >= 0.5,
+            "trust_level": "unknown",
+            "joined_fs_event": None,
+        }
+        detail.update(detail_overrides)
+        return SecurityEvent(
+            timestamp=datetime.now(),
+            source="agent_log",
+            actor_pid=0,
+            actor_name="claude_code",
+            event_type="agent_download",
+            target=detail["source_url"],
+            detail=detail,
+            risk_score=risk_score,
+        )
+
+    def test_agent_download_critical_for_sensitive_path(self):
+        """risk_score=0.9 (sensitive path) → critical alert."""
+        engine = self._make_engine()
+        event = self._download_event(
+            risk_score=0.9,
+            output_path="/Users/me/.ssh/id_rsa",
+            trust_level="known",
+        )
+        alerts = engine.evaluate_security_event(event)
+        assert len(alerts) == 1
+        assert alerts[0].level == "critical"
+        assert alerts[0].category == "agent_download_sensitive"
+
+    def test_agent_download_warning_for_untrusted_host(self):
+        """risk_score=0.5 (BLOCKED or UNKNOWN host) → warning alert."""
+        engine = self._make_engine()
+        event = self._download_event(
+            risk_score=0.5,
+            trust_level="unknown",
+        )
+        alerts = engine.evaluate_security_event(event)
+        assert len(alerts) == 1
+        assert alerts[0].level == "warning"
+        assert alerts[0].category == "agent_download_untrusted"
+
+    def test_agent_download_info_for_trusted(self):
+        """risk_score=0.2 (KNOWN/LEARNED host) → info alert."""
+        engine = self._make_engine()
+        event = self._download_event(
+            risk_score=0.2,
+            trust_level="known",
+            high_risk=False,
+        )
+        alerts = engine.evaluate_security_event(event)
+        assert len(alerts) == 1
+        assert alerts[0].level == "info"
+        assert alerts[0].category == "agent_download"
+
+    def test_agent_download_alert_message_includes_url_and_path(self):
+        """Forensic info (source_url + output_path) preserved in user alert."""
+        engine = self._make_engine()
+        event = self._download_event(
+            risk_score=0.5,
+            source_url="https://evil.example.com/dropper.sh",
+            output_path="/tmp/dropper.sh",
+            downloader="wget",
+            trust_level="unknown",
+        )
+        alerts = engine.evaluate_security_event(event)
+        assert len(alerts) == 1
+        msg = alerts[0].message
+        assert "https://evil.example.com/dropper.sh" in msg
+        assert "/tmp/dropper.sh" in msg
+        assert "wget" in msg

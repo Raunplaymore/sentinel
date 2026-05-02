@@ -437,6 +437,47 @@ class AlertEngine:
                 message=f"{actor} fetching: {event.target}",
                 emoji="\U0001f7e1", priority=2
             ))
+        elif event.event_type == "agent_download":
+            # ADR 0002 §D5 — agent_log_parser already set risk_score per
+            # the severity matrix (sensitive path → 0.9, BLOCKED/UNKNOWN
+            # host → 0.5, KNOWN/LEARNED host → 0.2). The engine does NOT
+            # re-score; it only maps the score to an Alert level so the
+            # macOS notification channel actually fires.
+            score = event.risk_score
+            source_url = event.detail.get("source_url", event.target)
+            output_path = event.detail.get("output_path") or "(unknown path)"
+            downloader = event.detail.get("downloader", "?")
+            if score >= 0.8:
+                # critical — sensitive output_path
+                alerts.append(Alert(
+                    level="critical", category="agent_download_sensitive",
+                    title="\U0001f6a8 AI Downloading to Sensitive Path",
+                    message=f"{actor} via {downloader}\n"
+                           f"From: {source_url}\n"
+                           f"To:   {output_path}",
+                    emoji="\U0001f534", priority=5
+                ))
+            elif score >= 0.5:
+                # warning — BLOCKED or UNKNOWN host
+                trust = event.detail.get("trust_level", "unknown")
+                alerts.append(Alert(
+                    level="warning", category="agent_download_untrusted",
+                    title="\U0001f4e5 AI Download from Untrusted Host",
+                    message=f"{actor} via {downloader} (host trust: {trust})\n"
+                           f"From: {source_url}\n"
+                           f"To:   {output_path}",
+                    emoji="\U0001f7e0", priority=4
+                ))
+            else:
+                # info — KNOWN/LEARNED host
+                alerts.append(Alert(
+                    level="info", category="agent_download",
+                    title="\U0001f4e5 AI Download",
+                    message=f"{actor} via {downloader}\n"
+                           f"From: {source_url}\n"
+                           f"To:   {output_path}",
+                    emoji="\U0001f7e1", priority=2
+                ))
 
         return self._apply_cooldowns(alerts, now=event.timestamp)
 
