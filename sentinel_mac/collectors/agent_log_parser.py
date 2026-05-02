@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from sentinel_mac.models import SecurityEvent
+from sentinel_mac.collectors.context import HostContext, TrustLevel
 from sentinel_mac.collectors.typosquatting import (
     check_typosquatting,
     extract_pip_packages,
@@ -87,6 +88,101 @@ HIGH_RISK_PATTERNS = [
     (re.compile(r"brew\s+install"), "homebrew package install"),
 ]
 
+# ── ADR 0001 D4: host-trust downgrade whitelist ─────────────────────────
+# ONLY these high-risk reasons may have their severity downgraded by host
+# trust signals (known_hosts / frequency learning). Every other reason is
+# blocked from downgrade so an attacker cannot launder dangerous patterns
+# (pipe-to-shell, rm -rf, eval, base64 -d, nc -l, inline code exec,
+# package installs) by inflating the apparent trust of an associated host.
+#
+# The strings below MUST match HIGH_RISK_PATTERNS reason values exactly.
+# See docs/decisions/0001-host-context.md (D4).
+_TRUST_DOWNGRADABLE_REASONS: frozenset[str] = frozenset({
+    "SSH connection",
+    "SCP file transfer",
+})
+
+# Compiled once: pull the host token out of an SSH/SCP command line.
+# Matches `ssh user@host`, `ssh host`, `ssh -p 22 host`, `scp file user@host:/path`.
+# `user@` and `host:` separators are stripped; flags (-p, -i, -o ...) are
+# skipped so the first non-flag positional argument is treated as the host.
+_SSH_FLAG_RE = re.compile(r"^-")
+_SSH_SCP_HOST_RE = re.compile(
+    r"(?:^|[\s'\"])"          # start of string or whitespace
+    r"(?:(?:ssh|scp))"        # ssh/scp leader (lowercased input)
+    r"\b"
+)
+
+
+def _extract_ssh_host(command: str) -> Optional[str]:
+    """Extract the remote hostname from an ssh/scp command line.
+
+    Returns the bare hostname (lowercased, stripped of ``user@`` and any
+    trailing ``:path``) or ``None`` if no plausible host token is found.
+
+    Conservative parser — when in doubt, returns ``None`` so the caller
+    falls back to default (high-risk) treatment rather than wrongly
+    downgrading on a malformed line.
+    """
+    if not command:
+        return None
+
+    tokens = command.strip().split()
+    if not tokens:
+        return None
+
+    leader = tokens[0].lower()
+    if leader not in ("ssh", "scp"):
+        return None
+
+    # Walk remaining tokens, skipping flags and their arguments.
+    # Recognized flag-with-argument forms: -p PORT, -i KEYFILE, -o OPT,
+    # -l LOGIN, -F CONFIG, -J JUMP, -L/-R/-D PORTSPEC, -b BINDADDR.
+    flags_with_arg = {"-p", "-i", "-o", "-l", "-F", "-J", "-L", "-R", "-D", "-b", "-c", "-e", "-m", "-Q", "-S", "-W", "-w"}
+
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        if _SSH_FLAG_RE.match(tok):
+            # Combined `-pPORT` or `-oFOO=bar` — skip just this token.
+            if len(tok) > 2 and tok[1] in {"p", "i", "o", "l", "F", "J", "L", "R", "D", "b", "c", "e", "m"}:
+                i += 1
+                continue
+            if tok in flags_with_arg:
+                i += 2  # consume flag + its argument
+                continue
+            i += 1
+            continue
+
+        # First non-flag token is the host (for scp it might be a local
+        # filename, but we still try to extract a host from the *next*
+        # token if this looks like a path).
+        candidate = tok
+        # scp source/destination form: try to find the user@host:/path
+        # token; pick the first token containing ':' (host:path) or '@'.
+        if leader == "scp" and ":" not in candidate and "@" not in candidate:
+            # local file — keep scanning for a remote spec.
+            i += 1
+            continue
+
+        # Strip user@
+        if "@" in candidate:
+            candidate = candidate.split("@", 1)[1]
+        # Strip :path (scp)
+        if ":" in candidate:
+            candidate = candidate.split(":", 1)[0]
+        # Strip [host]:port brackets if present
+        if candidate.startswith("[") and "]" in candidate:
+            candidate = candidate[1:].split("]", 1)[0]
+
+        candidate = candidate.strip().lower()
+        if not candidate:
+            return None
+        return candidate
+
+    return None
+
+
 # MCP injection patterns — detect prompt injection in MCP tool responses
 MCP_INJECTION_PATTERNS = [
     (re.compile(r"<system>|</system>", re.IGNORECASE), "system tag injection"),
@@ -120,12 +216,26 @@ class AgentLogParser:
     high-risk patterns. Matching events are pushed to the shared queue.
     """
 
-    def __init__(self, config: dict, event_queue: queue.Queue):
+    def __init__(
+        self,
+        config: dict,
+        event_queue: queue.Queue,
+        host_ctx: Optional[HostContext] = None,
+    ):
         sec_config = config.get("security", {}).get("agent_logs", {})
 
         self._event_queue = event_queue
         self._running = False
         self._thread: Optional[threading.Thread] = None
+
+        # Host context — when None, build a disabled instance so calls are
+        # cheap no-ops and existing tests keep working.
+        if host_ctx is None:
+            host_ctx = HostContext(
+                enabled=False,
+                cache_path=Path("/dev/null"),
+            )
+        self._host_ctx: HostContext = host_ctx
 
         # Configured parsers
         self._parsers = sec_config.get("parsers", [
@@ -348,27 +458,56 @@ class AgentLogParser:
 
     def _check_bash_command(self, command: str, timestamp: datetime,
                             entry: dict) -> list[SecurityEvent]:
-        """Check a bash command against high-risk patterns."""
+        """Check a bash command against high-risk patterns.
+
+        ADR 0001 D4: only patterns whose ``reason`` is in
+        ``_TRUST_DOWNGRADABLE_REASONS`` (currently SSH/SCP) may have their
+        severity downgraded by host trust signals. All other reasons are
+        emitted with ``high_risk=True`` regardless of host context — this
+        prevents an attacker from laundering pipe-to-shell, rm -rf, eval,
+        base64 -d, nc -l, inline code execution, or arbitrary package
+        installs by inflating an associated host's trust score.
+        """
         events = []
         command_lower = command.lower()
 
         for pattern, reason in HIGH_RISK_PATTERNS:
-            if pattern.search(command_lower):
-                events.append(SecurityEvent(
-                    timestamp=timestamp,
-                    source="agent_log",
-                    actor_pid=0,
-                    actor_name="claude_code",
-                    event_type="agent_command",
-                    target=command[:200],  # Truncate for readability
-                    detail={
-                        "tool": "Bash",
-                        "command": command[:500],
-                        "risk_reason": reason,
-                        "high_risk": True,
-                    },
-                ))
-                break  # One match is enough
+            if not pattern.search(command_lower):
+                continue
+
+            detail: dict = {
+                "tool": "Bash",
+                "command": command[:500],
+                "risk_reason": reason,
+                "high_risk": True,
+            }
+
+            # ADR D4 enforcement: host-trust downgrade is restricted to a
+            # frozen whitelist of reasons. Categories outside it skip the
+            # context lookup entirely so trust signals can never weaken
+            # the alert.
+            if reason in _TRUST_DOWNGRADABLE_REASONS:
+                host = _extract_ssh_host(command)
+                if host:
+                    self._host_ctx.observe(host)
+                    trust = self._host_ctx.classify(host)
+                    detail["trust_level"] = trust.value
+                    if trust in (TrustLevel.LEARNED, TrustLevel.KNOWN):
+                        detail["high_risk"] = False
+                        detail["downgrade_reason"] = (
+                            f"host trust={trust.value}"
+                        )
+
+            events.append(SecurityEvent(
+                timestamp=timestamp,
+                source="agent_log",
+                actor_pid=0,
+                actor_name="claude_code",
+                event_type="agent_command",
+                target=command[:200],  # Truncate for readability
+                detail=detail,
+            ))
+            break  # One match is enough
 
         return events
 

@@ -204,11 +204,45 @@ class AlertEngine:
         else:
             alerts = self._evaluate_fs_event(event)
 
+        # ADR 0001: host-trust downgrade. Built-in alerts get one severity
+        # step removed (warning -> info, critical -> warning) when the
+        # collector marked the event as trustable. BLOCKED hosts are
+        # explicitly exempt — even if `downgrade` was set upstream we
+        # never weaken an alert against a user-blocklisted host. Custom
+        # user rules below are intentionally NOT downgraded so user
+        # intent always wins.
+        alerts = self._apply_trust_downgrade(alerts, event)
+
         # Apply custom rules on top of built-in rules
         if self._custom_rules:
             custom_alerts = self._evaluate_custom_rules(event)
             alerts.extend(self._apply_cooldowns(custom_alerts, now=event.timestamp))
 
+        return alerts
+
+    @staticmethod
+    def _apply_trust_downgrade(
+        alerts: list[Alert], event: SecurityEvent,
+    ) -> list[Alert]:
+        """Downgrade alert severity by one step when host trust signals it.
+
+        Reads two optional fields populated by collectors:
+            event.detail["downgrade"]    — bool, requested downgrade
+            event.detail["trust_level"]  — "unknown"/"learned"/"known"/"blocked"
+
+        BLOCKED takes precedence — a blocklisted host always preserves
+        original severity, even if downgrade=True somehow leaked through.
+        """
+        if not alerts:
+            return alerts
+        if not event.detail.get("downgrade", False):
+            return alerts
+        if event.detail.get("trust_level") == "blocked":
+            return alerts
+
+        step = {"critical": "warning", "warning": "info", "info": "info"}
+        for alert in alerts:
+            alert.level = step.get(alert.level, alert.level)
         return alerts
 
     def _evaluate_fs_event(self, event: SecurityEvent) -> list[Alert]:
