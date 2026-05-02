@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-02
+
+The "polish + performance" release. Three themes — context-aware
+detection (v0.6), user-facing power features (v0.7), and operational
+correctness + forensic visibility (v0.8) — shipped over 17 PRs since
+v0.5.3. 256 tests → 680 (+424). Seven Architecture Decision Records
+(ADR 0001–0007) freeze the contracts that future contributors must
+not silently break.
+
+### Highlights for users
+
+- **Smart alerts** — `~/.ssh/known_hosts` and frequency learning let
+  Sentinel downgrade alerts on hosts you have actually been working
+  with. Off by default; opt in via `security.context_aware.enabled`.
+- **Forensic context in every alert** — when a typosquat, MCP
+  injection, or sensitive write fires, the alert now answers WHO /
+  WHERE / WHAT / HOW with project name, git branch + commit, Claude
+  Code session id + model, and the cwd at the time of the command.
+- **Real-time daemon reload** — `sentinel context block evil.com`
+  takes effect sub-second, no `sentinel restart` needed (SIGHUP).
+- **`sentinel doctor`** — one-shot health check across daemon,
+  config, permissions, hooks, cache integrity, and dependencies.
+- **`sentinel context …` CLI** — `status` / `forget` / `block` /
+  `unblock` for the host-trust cache, with `--json` output.
+- **Filtered audit reports** — `sentinel --report --since 7d
+  --severity critical --type agent_command --json` for triage
+  (versioned envelope per ADR 0004 §D2).
+- **Download tracking** — `curl -o`, `wget`, `git clone` source URL
+  is paired with the resulting file via a 5-minute FSWatcher join.
+- **`pip install sentinel-mac`** (no extras) is now sufficient for
+  the full mutating-CLI surface — `block`/`unblock` automatically
+  fall back to PyYAML if `[app]`'s ruamel is missing.
+- **Privacy promise unchanged** — nothing leaves your machine
+  unless you opt in. Even the alert `[ctx]` block omits the git
+  remote URL by design.
+
 ### Added (v0.8 Track 2 freeze)
 - ADR 0007 — Forensic Context Enrichment. Direct response to a user
   report ("로그에서 알 수 있는 정보들이 너무 한정적이야 … 누가, 어느
@@ -239,5 +275,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `uninstall.sh` clean removal
 - PyPI package: `pip install sentinel-mac`
 
-[Unreleased]: https://github.com/raunplaymore/sentinel/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/raunplaymore/sentinel/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/raunplaymore/sentinel/compare/v0.5.3...v0.8.0
+[0.5.3]: https://github.com/raunplaymore/sentinel/releases/tag/v0.5.3
 [0.1.0]: https://github.com/raunplaymore/sentinel/releases/tag/v0.1.0
