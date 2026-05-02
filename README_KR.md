@@ -63,6 +63,12 @@ sentinel status            # 실행 상태 확인 (PID 표시)
 sentinel --once            # 시스템 스냅샷 (1회)
 sentinel --report          # 오늘의 이벤트 요약
 sentinel --report 7        # 최근 7일 이벤트 요약
+
+# 필터링된 리포트 (v0.7+)
+sentinel --report --since 7d --severity critical
+sentinel --report --since 24h --source agent_log --type agent_command
+sentinel --report --json --since 30d > events.json    # versioned envelope (ADR 0004)
+
 sentinel logs              # 실시간 로그 보기
 sentinel --test-notify     # 모든 채널에 테스트 알림 전송
 sentinel --version         # 버전 확인
