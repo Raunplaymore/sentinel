@@ -376,16 +376,25 @@ class TestForget:
         cfg = _write_config(
             tmp_path, enabled=True, cache_path=fake_cache
         )
-        # Pretend the daemon holds the lock — text mode should print the
-        # restart notice. We patch the detector instead of running a real
-        # flock so the test stays hermetic.
+        # ADR 0005 §D7 — when the daemon is running, `forget` SIGHUPs it
+        # and prints `Applied to running daemon (PID NNN).` to stderr,
+        # replacing the pre-v0.8 "Restart the daemon" stdout notice.
+        # Mock _signal_daemon_reload so no real SIGHUP fires; the helper
+        # contract is `(status, pid)` per the new D7 surface.
         monkeypatch.setattr(
             ctx_cli, "_is_daemon_running", lambda: True
         )
+        monkeypatch.setattr(
+            ctx_cli, "_signal_daemon_reload", lambda: ("applied", 4242)
+        )
         rc = _run(["forget", "github.com", "--config", str(cfg)])
         assert rc == 0
-        out = capsys.readouterr().out
-        assert "Restart the daemon" in out
+        captured = capsys.readouterr()
+        # ADR 0005 §D7 frozen message location: stderr.
+        assert "Applied to running daemon (PID 4242)." in captured.err
+        # Old "Restart the daemon" notice removed (CHANGELOG v0.8 Track 1a).
+        assert "Restart the daemon" not in captured.out
+        assert "Restart the daemon" not in captured.err
 
     def test_validation_error_exit_2(
         self, tmp_path, monkeypatch, capsys

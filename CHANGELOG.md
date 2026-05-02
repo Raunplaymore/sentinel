@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (v0.8 Track 1a)
+- SIGHUP-driven daemon reload (ADR 0005). The daemon now picks up
+  `config.yaml` mutations without a restart. `sentinel context block /
+  unblock / forget` automatically signals the running daemon via
+  SIGHUP after the file write succeeds; manual `kill -HUP $(cat
+  ~/.local/share/sentinel/sentinel.lock)` also works.
+- Sub-second reload latency via a dedicated worker thread that
+  `wait()`s on a `threading.Event`. Multiple SIGHUPs in rapid
+  succession coalesce to one reload (event clear()ed before each
+  iteration).
+- Atomic-or-nothing reload (ADR 0005 §D3): config parse / validation
+  / new-component construction are all done into local variables;
+  only the final swap mutates `self.*`. Any failure leaves the
+  daemon on the old config and logs a warning.
+- `sentinel context` mutation envelopes gain an additive
+  `daemon_reload` field per ADR 0005 §D7 with values
+  `{"applied", "skipped_not_running", "failed_unreachable"}`.
+
+### Changed (v0.8 Track 1a)
+- `sentinel context block / unblock / forget` now print
+  `Applied to running daemon (PID NNN).` (or
+  `Daemon not reachable; restart manually...`) on stderr after the
+  mutation, replacing the previous `Restart the daemon` notice.
+
 ### Added (v0.8 freeze)
 - ADR 0005 — Daemon Reload Protocol. Freezes the SIGHUP-driven reload
   contract: which sources reload (config / known_hosts / host_context),

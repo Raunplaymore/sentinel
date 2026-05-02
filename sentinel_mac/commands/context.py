@@ -44,6 +44,8 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import os
+import signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -143,17 +145,70 @@ def _validate_host(raw: Optional[str]) -> str:
 # ── daemon detection ───────────────────────────────────────────────
 
 
+def _read_daemon_pid() -> Optional[int]:
+    """Return the PID recorded in ``sentinel.lock`` if a live daemon owns it.
+
+    Reads the lock file (written by ``try_acquire_daemon_lock`` in
+    ``core``), parses the PID, and confirms the process is still alive
+    via ``os.kill(pid, 0)``. Returns ``None`` when:
+
+    * the lock file does not exist (no daemon ever started, or it was
+      cleared between sessions);
+    * the file exists but is empty / unparseable (typically a half-written
+      state we should not act on);
+    * the recorded PID no longer matches a running process (stale lock).
+
+    Side-effect-free — uses signal 0, which performs the permission
+    check without delivering anything. Permission errors on the probe
+    are treated as "process exists but not ours" (the daemon ran under
+    another user / namespace) and the PID is returned so the caller
+    can surface ``failed_unreachable`` accurately.
+    """
+    lock_path = daemon_lock_path()
+    if not lock_path.exists():
+        return None
+    try:
+        raw = lock_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        pid = int(raw.split()[0])
+    except (ValueError, IndexError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        # Stale lock — daemon crashed without releasing it.
+        return None
+    except PermissionError:
+        # Process exists but we cannot signal it. Surface the PID so
+        # callers can decide (signal_daemon_reload reports "failed_unreachable").
+        return pid
+    except OSError:
+        return None
+    return pid
+
+
 def _is_daemon_running() -> bool:
     """Best-effort check whether the Sentinel daemon currently holds the lock.
 
-    Strategy: if ``sentinel.lock`` does not exist, no daemon. If it does,
-    try to grab the same exclusive flock non-blocking; success means
-    nobody else holds it (so no daemon). We always release immediately
-    and never write to the file from the CLI side.
+    Implemented on top of ``_read_daemon_pid`` so the CLI has a single
+    PID-derivation path: if a live PID owns the lock, the daemon is
+    running. Falls back to the historical ``flock``-based probe only
+    when the PID-based path returns ``None`` *and* the lock file still
+    exists, in case a future writer ever skips the PID payload.
 
     Returns False on any unexpected OSError (best-effort — a stale lock
     file with permission issues should not block CLI mutations).
     """
+    pid = _read_daemon_pid()
+    if pid is not None:
+        return True
+
     lock_path = daemon_lock_path()
     if not lock_path.exists():
         return False
@@ -182,12 +237,63 @@ def _is_daemon_running() -> bool:
             pass
 
 
-def _daemon_restart_notice() -> str:
-    """Human notice printed after a successful mutation when daemon is up."""
-    return (
-        "Restart the daemon (`sentinel restart`) for the running instance "
-        "to pick up the change."
-    )
+# ADR 0005 §D7 — frozen enum returned by ``_signal_daemon_reload``.
+# Tests reference this constant verbatim to lock the surface.
+DAEMON_RELOAD_RESULTS: frozenset[str] = frozenset(
+    {"applied", "skipped_not_running", "failed_unreachable"}
+)
+
+
+def _signal_daemon_reload() -> tuple[str, Optional[int]]:
+    """ADR 0005 §D7 — signal the running daemon to reload its config.
+
+    Returns ``(status, pid)`` where ``status`` is one of the three
+    frozen values:
+
+    * ``"applied"`` — ``os.kill(pid, SIGHUP)`` succeeded; the daemon's
+      reload worker will pick the change up sub-second per ADR 0005 §D5.
+    * ``"failed_unreachable"`` — a live PID is recorded but signalling
+      failed (``ProcessLookupError`` after the read raced with daemon
+      exit, or ``PermissionError`` from a cross-user setup).
+    * ``"skipped_not_running"`` — no live daemon to signal. The lock
+      file is missing or stale; nothing to do.
+
+    Side-effect-free when the daemon is not running. Never raises —
+    callers can use the return value directly in the ADR 0004 §D2
+    envelope without try/except plumbing.
+    """
+    pid = _read_daemon_pid()
+    if pid is None:
+        return "skipped_not_running", None
+    try:
+        os.kill(pid, signal.SIGHUP)
+    except ProcessLookupError:
+        # Daemon exited between _read_daemon_pid's probe and our SIGHUP.
+        return "failed_unreachable", pid
+    except PermissionError:
+        return "failed_unreachable", pid
+    except OSError:
+        return "failed_unreachable", pid
+    return "applied", pid
+
+
+def _daemon_reload_notice(status: str, pid: Optional[int]) -> Optional[str]:
+    """Render the human-facing stderr line for a daemon-reload outcome.
+
+    ADR 0005 §D7 message contract:
+      * "applied"             → "Applied to running daemon (PID {pid})."
+      * "failed_unreachable"  → "Daemon not reachable; restart manually
+                                 with `sentinel restart`."
+      * "skipped_not_running" → None (no message — the absence of a
+                                 daemon is the normal CLI-only path).
+    """
+    if status == "applied":
+        return f"Applied to running daemon (PID {pid})."
+    if status == "failed_unreachable":
+        return (
+            "Daemon not reachable; restart manually with `sentinel restart`."
+        )
+    return None
 
 
 def _disabled_notice() -> str:
@@ -499,7 +605,9 @@ def cmd_forget(args: argparse.Namespace) -> int:
         # ADR §D4 — still allowed; the user is preparing state for when
         # they enable the feature. We can't remove anything from a disabled
         # context (the cache is never loaded), but we should report that
-        # cleanly rather than pretending we did something.
+        # cleanly rather than pretending we did something. ADR 0005 §D7
+        # — no file write means no SIGHUP, but emit `daemon_reload` for
+        # envelope-shape consistency across all forget paths.
         if args.json:
             _emit_json_envelope(
                 kind="host_context_mutation",
@@ -507,6 +615,7 @@ def cmd_forget(args: argparse.Namespace) -> int:
                     "action": "forget",
                     "host": host,
                     "result": "not_found",
+                    "daemon_reload": "skipped_not_running",
                     "enabled": False,
                 },
             )
@@ -526,6 +635,14 @@ def cmd_forget(args: argparse.Namespace) -> int:
     if removed:
         ctx.flush()
 
+    # ADR 0005 §D7 — only signal a reload when the cache actually changed.
+    # `forget` on an unknown host is a no-op so there is nothing for the
+    # daemon to pick up; skip the SIGHUP to keep the call truly idempotent.
+    if removed:
+        reload_status, reload_pid = _signal_daemon_reload()
+    else:
+        reload_status, reload_pid = "skipped_not_running", None
+
     daemon_running = _is_daemon_running()
 
     if args.json:
@@ -536,16 +653,19 @@ def cmd_forget(args: argparse.Namespace) -> int:
                 "host": host,
                 "result": "removed" if removed else "not_found",
                 "daemon_running": daemon_running,
+                "daemon_reload": reload_status,
                 "enabled": True,
             },
         )
     else:
         if removed:
             print(f"Removed '{host}' from host context cache.")
-            if daemon_running:
-                print(_daemon_restart_notice())
         else:
             print(f"Host '{host}' not found in host context cache.")
+
+    notice = _daemon_reload_notice(reload_status, reload_pid)
+    if notice is not None:
+        _err(notice)
 
     return 0 if removed else 1
 
@@ -649,6 +769,10 @@ def _mutate_blocklist(
             result = "added"
     elif action == "remove":
         if host not in existing_norm:
+            # No file write happened, so no SIGHUP is sent (ADR 0005 §D7
+            # — additive `daemon_reload` field still emitted with the
+            # `skipped_not_running` value so envelope shape stays stable
+            # across the success / no-op axes).
             if args.json:
                 _emit_json_envelope(
                     kind="host_context_mutation",
@@ -656,6 +780,7 @@ def _mutate_blocklist(
                         "action": "unblock",
                         "host": host,
                         "result": "not_found",
+                        "daemon_reload": "skipped_not_running",
                     },
                 )
             else:
@@ -688,6 +813,14 @@ def _mutate_blocklist(
     enabled = _is_context_enabled(_load_after_mutation(config_path))
     daemon_running = _is_daemon_running()
 
+    # ADR 0005 §D7 — fire SIGHUP only when the file actually changed.
+    # An "already_present" block is a no-op on disk; signalling would
+    # cause an unnecessary reload (harmless but pointless).
+    if result in {"added", "removed"}:
+        reload_status, reload_pid = _signal_daemon_reload()
+    else:
+        reload_status, reload_pid = "skipped_not_running", None
+
     if args.json:
         _emit_json_envelope(
             kind="host_context_mutation",
@@ -697,6 +830,7 @@ def _mutate_blocklist(
                 "result": result,
                 "config_path": str(config_path),
                 "daemon_running": daemon_running,
+                "daemon_reload": reload_status,
                 "enabled": enabled,
             },
         )
@@ -709,10 +843,12 @@ def _mutate_blocklist(
         else:  # remove
             print(f"Removed '{host}' from blocklist ({config_path}).")
 
-        if daemon_running and result in {"added", "removed"}:
-            print(_daemon_restart_notice())
         if not enabled and result in {"added", "removed"}:
             print(_disabled_notice())
+
+    notice = _daemon_reload_notice(reload_status, reload_pid)
+    if notice is not None:
+        _err(notice)
 
     return 0
 
