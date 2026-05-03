@@ -304,15 +304,40 @@ def _basename_from_url(url: str) -> Optional[str]:
     return base or None
 
 
+def _token_as_url(token: str) -> Optional[str]:
+    """Return ``token`` if it parses as an http(s):// URL, else None.
+
+    Single-token URL recognizer shared by:
+      - :func:`_extract_url` (list-of-tokens variant)
+      - :func:`_extract_curl_download` (curl flag-loop body)
+      - :func:`_extract_wget_download` (wget flag-loop body)
+
+    v0.9 Track 1 (2026-05-03): introduced to retire the duplicated
+    ``tok.startswith(("http://", "https://"))`` inline check across the
+    three call sites. Each previously had its own copy and could drift
+    independently — the curl ``-o`` branch and the redirect-only branch
+    used to disagree on whether to strip surrounding quotes. They now
+    share this one definition; behavior is the union (quote-stripped
+    URLs are accepted everywhere) so the only externally observable
+    change is that ``"curl '-o' '/tmp/x' 'https://x.com/y'"`` (with
+    each token quote-wrapped by a logging shell) is now correctly
+    detected by both branches instead of only the redirect-only one.
+    """
+    if token.startswith(("http://", "https://")):
+        return token
+    # Some shells quote URLs; strip surrounding quotes.
+    stripped = token.strip("'\"")
+    if stripped.startswith(("http://", "https://")):
+        return stripped
+    return None
+
+
 def _extract_url(tokens: list[str]) -> Optional[str]:
     """Find the first http(s):// token in a tokenized command line."""
     for tok in tokens:
-        if tok.startswith(("http://", "https://")):
-            return tok
-        # Some shells quote URLs; strip surrounding quotes.
-        stripped = tok.strip("'\"")
-        if stripped.startswith(("http://", "https://")):
-            return stripped
+        url = _token_as_url(tok)
+        if url is not None:
+            return url
     return None
 
 
@@ -365,9 +390,12 @@ def _extract_curl_download(tokens: list[str]) -> Optional[dict]:
         if tok in _CURL_ARG_FLAGS:
             i += 2
             continue
-        if tok.startswith(("http://", "https://")):
+        # v0.9 Track 1 — share the URL recognizer with the redirect-only
+        # branch (was a copy/paste of startswith() — drift risk).
+        candidate_url = _token_as_url(tok)
+        if candidate_url is not None:
             if url is None:
-                url = tok
+                url = candidate_url
             i += 1
             continue
         # Bare flags we don't know — just skip without consuming next.
@@ -424,9 +452,11 @@ def _extract_wget_download(tokens: list[str]) -> Optional[dict]:
             output_path = tok.split("=", 1)[1]
             i += 1
             continue
-        if tok.startswith(("http://", "https://")):
+        # v0.9 Track 1 — same shared URL recognizer used by curl above.
+        candidate_url = _token_as_url(tok)
+        if candidate_url is not None:
             if url is None:
-                url = tok
+                url = candidate_url
             i += 1
             continue
         if tok.startswith("-"):

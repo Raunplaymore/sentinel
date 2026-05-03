@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed (v0.9 Track 1)
+- Profile pass on three representative workloads (busy JSONL with
+  1000 mixed Claude Code records, fs_watcher 100-event bulk_change
+  spike, NetTracker 50-connection burst). Results captured at
+  `docs/perf/v0.9-profile-2026-05-03.md` for future comparison;
+  reproducible via `python3 scripts/profile_workload.py`.
+- `_merge_joined_detail`: lock layering tightened. `EventLogger`
+  gains `update_event_detail_by_id` which performs partial detail
+  patches under the same lock as `write_event` (shared
+  `_rewrite_one_locked` implementation). FSWatcher's download-join
+  path now calls it instead of doing a two-phase
+  read-then-wholesale-replace, so concurrent joins on the same
+  `event_id` no longer have a last-write-wins window. The legacy
+  `update_event_by_id` API is unchanged for back-compat.
+- `_pending_downloads`: replaced inline-only GC at register/lookup
+  time with a 30-second background sweeper thread owned by
+  `FSWatcher.start()`/`stop()`. Memory bound is now deterministic
+  regardless of register frequency or whether matching fs events
+  ever arrive. `sweeper_interval_seconds` is configurable under
+  `security.download_tracking` (default 30s; tests use 50ms).
+- `_extract_url` consolidated. A new single-token recognizer
+  `_token_as_url(str)` is now shared by `_extract_url`,
+  `_extract_curl_download`, and `_extract_wget_download` (each
+  previously had its own copy of `tok.startswith(("http://", …))`
+  and could drift independently). Drift risk eliminated; the only
+  externally observable change is that quote-wrapped URL tokens
+  (`'https://x.com/y'` from a logging shell) are now recognized in
+  the curl `-o` and wget `-O` flag-loop bodies, matching the
+  pre-existing redirect-only-branch behavior.
+- `update_event_by_id` O(N) JSONL rewrite kept as-is. The
+  2026-05-03 profile pass showed it sub-millisecond on
+  representative workloads (top-20 cumulative entries did NOT
+  include it on any of the three scenarios; a hand-shaped trace of
+  a 1000-line rewrite stayed at ~1.2ms). An inline `MONITOR`
+  comment at the function explains the deferral with a back-link
+  to the profile report. The in-memory `event_id → line_offset`
+  index remains the right answer if a future profile pass shows
+  this call in the top-20.
+
 ### Added (v0.9 Track 3b)
 - stuck_process false-positive fix (PR #28 follow-up): the
   AlertEngine now consults the agent log parser's last

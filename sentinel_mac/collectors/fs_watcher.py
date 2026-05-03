@@ -138,6 +138,22 @@ class FSWatcher:
         self._pending_lock = threading.Lock()
         self._event_logger: Optional["EventLogger"] = None
 
+        # v0.9 Track 1 (2026-05-03) — background sweeper for the
+        # pending-downloads dict. The previous design only GC'd inside
+        # _consume_pending_download (i.e. on every fs event). When fs
+        # events are sparse but registers are bursty (e.g. many curl
+        # downloads to paths the watcher never sees because they land
+        # outside watch_paths or under an ignore pattern), expired
+        # entries piled up unboundedly. The sweeper runs every 30s and
+        # drops any entry whose deadline has passed. Lifecycle is
+        # owned by start()/stop() so unit tests that build an FSWatcher
+        # without calling start() (most tests do) pay zero overhead.
+        self._sweeper_thread: Optional[threading.Thread] = None
+        self._sweeper_stop = threading.Event()
+        self._sweeper_interval_seconds: float = float(
+            download_cfg.get("sweeper_interval_seconds", 30)
+        )
+
         # Paths to watch (expand ~)
         self._watch_paths = [
             os.path.expanduser(p)
@@ -279,6 +295,11 @@ class FSWatcher:
         self._observer.daemon = True
         self._running = True
         self._observer.start()
+        # v0.9 Track 1 — start the pending_downloads sweeper alongside
+        # the observer. Only meaningful when download tracking is on,
+        # but the cost when off is one no-op tick every 30s so we
+        # always start it for consistency with the observer lifecycle.
+        self._start_pending_sweeper()
         logger.info(f"FSWatcher: started ({len(valid_paths)} paths)")
 
     def stop(self):
@@ -287,7 +308,77 @@ class FSWatcher:
             self._running = False
             self._observer.stop()
             self._observer.join(timeout=5)
+            self._stop_pending_sweeper()
             logger.info("FSWatcher: stopped")
+
+    def _start_pending_sweeper(self) -> None:
+        """Spawn the periodic GC thread for ``_pending_downloads``.
+
+        Idempotent — safe to call multiple times; later calls are no-ops
+        as long as the previous thread is still alive. The thread is
+        marked daemon so an unexpected exit (e.g. test process crash)
+        does not hang.
+        """
+        if self._sweeper_thread is not None and self._sweeper_thread.is_alive():
+            return
+        self._sweeper_stop.clear()
+        thread = threading.Thread(
+            target=self._pending_sweeper_loop,
+            name="FSWatcher-pending-sweeper",
+            daemon=True,
+        )
+        self._sweeper_thread = thread
+        thread.start()
+
+    def _stop_pending_sweeper(self) -> None:
+        """Signal the sweeper thread to exit and join it.
+
+        Bounded join (interval + 1s) so a stuck sweeper cannot hold up
+        FSWatcher.stop() — the daemon flag is the final escape hatch.
+        """
+        thread = self._sweeper_thread
+        if thread is None:
+            return
+        self._sweeper_stop.set()
+        thread.join(timeout=self._sweeper_interval_seconds + 1.0)
+        self._sweeper_thread = None
+
+    def _pending_sweeper_loop(self) -> None:
+        """Drop expired entries from ``_pending_downloads`` every tick.
+
+        Uses ``Event.wait`` instead of ``time.sleep`` so ``stop()`` can
+        cut the wait short. A swept-clean dict is the steady state when
+        registers stop arriving — important for the long-running daemon
+        case where the watcher is up for days.
+        """
+        interval = self._sweeper_interval_seconds
+        while not self._sweeper_stop.wait(interval):
+            try:
+                self._sweep_pending_downloads()
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.debug(
+                    "FSWatcher: pending sweeper tick failed: %s", exc,
+                )
+
+    def _sweep_pending_downloads(self) -> int:
+        """Drop expired entries; return the number swept (for tests).
+
+        Cheap O(N) over a dict that's bounded in practice by the join
+        window cap (1800s) × register rate. Holds the pending lock for
+        the duration of one tick so `register_download` and
+        `_consume_pending_download` see a consistent view.
+        """
+        now_epoch = int(time.time())
+        with self._pending_lock:
+            if not self._pending_downloads:
+                return 0
+            expired = [
+                p for p, e in self._pending_downloads.items()
+                if e.deadline_epoch < now_epoch
+            ]
+            for p in expired:
+                self._pending_downloads.pop(p, None)
+            return len(expired)
 
     def _handle_fs_event(self, path: str, event_type: str):
         """Process a raw file system event."""
@@ -401,14 +492,20 @@ class FSWatcher:
         # caller can apply the suppression policy uniformly.
         if self._event_logger is not None:
             try:
-                # Read+merge the existing detail dict so additive keys
-                # already on the line (e.g., other Pro consumers) are
-                # preserved — we only set joined_fs_event.
-                self._event_logger.update_event_by_id(
+                # v0.9 Track 1 (2026-05-03): use the single-shot detail
+                # patch API. Previously this site called
+                # _merge_joined_detail (which read the JSONL OUTSIDE the
+                # logger lock to surface the existing detail dict) and
+                # then update_event_by_id with a wholesale ``{"detail": …}``
+                # replacement — leaving a window where a concurrent join
+                # on the same event_id could last-write-wins. The new
+                # update_event_detail_by_id reads + merges + rewrites
+                # under the same lock as write_event, so additive keys
+                # set by other consumers (e.g. future Pro tooling) are
+                # preserved without a second read pass on our side.
+                self._event_logger.update_event_detail_by_id(
                     entry.event_id,
-                    {"detail": self._merge_joined_detail(
-                        entry, joined_fs_event,
-                    )},
+                    {"joined_fs_event": joined_fs_event},
                     date=entry.date,
                 )
             except Exception as exc:  # pragma: no cover — best-effort
@@ -417,47 +514,6 @@ class FSWatcher:
                     entry.event_id, exc,
                 )
         return True
-
-    def _merge_joined_detail(
-        self, entry: PendingDownload, joined_fs_event: dict,
-    ) -> dict:
-        """Re-read the original detail dict from JSONL and overlay
-        ``joined_fs_event`` on it. Falls back to a minimal dict if the
-        original line cannot be located (caller already holds the lock
-        when calling update_event_by_id, so we read the file ourselves).
-        """
-        # We can't easily get the original detail without scanning, and
-        # update_event_by_id replaces top-level "detail" wholesale. The
-        # safest pattern: scan the day's file once for our event_id and
-        # surface its current detail, then overlay joined_fs_event. This
-        # is O(N) but bounded (~100 events/day per ADR 0002 §D3).
-        if self._event_logger is None:
-            return {"joined_fs_event": joined_fs_event}
-        try:
-            events_dir = self._event_logger._events_dir  # type: ignore[attr-defined]
-            path = events_dir / f"{entry.date.strftime('%Y-%m-%d')}.jsonl"
-            if not path.exists():
-                return {"joined_fs_event": joined_fs_event}
-            import json as _json
-            with open(path, "r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = _json.loads(line)
-                    except _json.JSONDecodeError:
-                        continue
-                    if obj.get("event_id") == entry.event_id:
-                        existing = obj.get("detail", {}) or {}
-                        if isinstance(existing, dict):
-                            existing = dict(existing)
-                            existing["joined_fs_event"] = joined_fs_event
-                            return existing
-                        break
-        except OSError:
-            pass
-        return {"joined_fs_event": joined_fs_event}
 
     def _should_ignore(self, path: str) -> bool:
         """Check if path matches any ignore pattern."""
