@@ -19,6 +19,7 @@ import os
 import queue
 import tempfile
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -822,3 +823,388 @@ class TestDownloadTrackingConfig:
         watcher = FSWatcher(config, queue.Queue())
         assert watcher.download_tracking_enabled is False
         assert watcher.join_window_seconds == 300
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 8. v0.9 Track 1 — EventLogger.update_event_detail_by_id (3-A)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestEventLoggerDetailMerge:
+    """v0.9 Track 1 (3-A) — partial detail patch under the writer lock.
+
+    Replaces the previous two-phase pattern (FSWatcher reads JSONL outside
+    the lock to surface the existing detail dict, then calls
+    update_event_by_id with a wholesale ``{"detail": …}`` replacement).
+    Concurrent joins on the same event_id no longer have a last-write-wins
+    window because read+merge+rewrite happen under the same lock that
+    guards write_event.
+    """
+
+    def _make_event(self, **detail_overrides) -> SecurityEvent:
+        detail = {
+            "source_url": "https://x/y",
+            "output_path": "/tmp/y",
+            "downloader": "curl",
+            "command": "curl https://x/y -o /tmp/y",
+            "high_risk": False,
+            "trust_level": "unknown",
+            "joined_fs_event": None,
+        }
+        detail.update(detail_overrides)
+        return SecurityEvent(
+            timestamp=datetime.now(),
+            source="agent_log",
+            actor_pid=0,
+            actor_name="claude_code",
+            event_type="agent_download",
+            target="https://x/y",
+            detail=detail,
+        )
+
+    def test_partial_patch_preserves_existing_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = EventLogger(tmp)
+            ev = self._make_event()
+            logger.log(ev)
+
+            patch_dict = {"joined_fs_event": {"actor_name": "curl"}}
+            ok = logger.update_event_detail_by_id(ev.event_id, patch_dict)
+            assert ok is True
+            logger.close()
+
+            today = datetime.now().strftime("%Y-%m-%d")
+            with open(Path(tmp) / "events" / f"{today}.jsonl") as fh:
+                obj = json.loads(fh.readline())
+
+            # Existing keys preserved verbatim.
+            assert obj["detail"]["source_url"] == "https://x/y"
+            assert obj["detail"]["output_path"] == "/tmp/y"
+            assert obj["detail"]["downloader"] == "curl"
+            assert obj["detail"]["command"] == "curl https://x/y -o /tmp/y"
+            assert obj["detail"]["trust_level"] == "unknown"
+            # Patched key applied.
+            assert obj["detail"]["joined_fs_event"] == {"actor_name": "curl"}
+
+    def test_patch_overwrites_overlapping_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = EventLogger(tmp)
+            ev = self._make_event(high_risk=False)
+            logger.log(ev)
+
+            ok = logger.update_event_detail_by_id(
+                ev.event_id, {"high_risk": True},
+            )
+            assert ok is True
+            logger.close()
+
+            today = datetime.now().strftime("%Y-%m-%d")
+            with open(Path(tmp) / "events" / f"{today}.jsonl") as fh:
+                obj = json.loads(fh.readline())
+            assert obj["detail"]["high_risk"] is True
+            # Other keys still there.
+            assert obj["detail"]["source_url"] == "https://x/y"
+
+    def test_unknown_id_returns_false(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = EventLogger(tmp)
+            logger.log(self._make_event())
+            assert logger.update_event_detail_by_id(
+                "not-a-real-uuid", {"x": 1},
+            ) is False
+            logger.close()
+
+    def test_missing_file_returns_false(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = EventLogger(tmp)
+            assert logger.update_event_detail_by_id(
+                str(uuid.uuid4()), {"x": 1},
+            ) is False
+            logger.close()
+
+    def test_only_matching_line_is_modified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = EventLogger(tmp)
+            evs = [self._make_event() for _ in range(5)]
+            for ev in evs:
+                logger.log(ev)
+            target = evs[2]
+
+            ok = logger.update_event_detail_by_id(
+                target.event_id, {"marker": "X"},
+            )
+            assert ok is True
+            logger.close()
+
+            today = datetime.now().strftime("%Y-%m-%d")
+            with open(Path(tmp) / "events" / f"{today}.jsonl") as fh:
+                lines = [json.loads(line) for line in fh if line.strip()]
+            assert len(lines) == 5
+            for line in lines:
+                if line["event_id"] == target.event_id:
+                    # Patched key present, original keys preserved.
+                    assert line["detail"]["marker"] == "X"
+                    assert line["detail"]["source_url"] == "https://x/y"
+                else:
+                    # Untouched: marker key never appears.
+                    assert "marker" not in line["detail"]
+
+    def test_concurrent_detail_patches_no_lost_writes(self):
+        """Two threads patching the same event_id with different keys —
+        both keys must end up on the line (no last-write-wins window)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = EventLogger(tmp)
+            ev = self._make_event()
+            logger.log(ev)
+
+            barrier = threading.Barrier(2)
+
+            def patch_a() -> None:
+                barrier.wait()
+                logger.update_event_detail_by_id(
+                    ev.event_id, {"key_from_a": "a"},
+                )
+
+            def patch_b() -> None:
+                barrier.wait()
+                logger.update_event_detail_by_id(
+                    ev.event_id, {"key_from_b": "b"},
+                )
+
+            ta = threading.Thread(target=patch_a)
+            tb = threading.Thread(target=patch_b)
+            ta.start()
+            tb.start()
+            ta.join()
+            tb.join()
+            logger.close()
+
+            today = datetime.now().strftime("%Y-%m-%d")
+            with open(Path(tmp) / "events" / f"{today}.jsonl") as fh:
+                obj = json.loads(fh.readline())
+            # Both threads' patches present — neither was clobbered by
+            # the other's wholesale rewrite (the v0.9 Track 1 contract).
+            assert obj["detail"]["key_from_a"] == "a"
+            assert obj["detail"]["key_from_b"] == "b"
+            # Original keys still present.
+            assert obj["detail"]["source_url"] == "https://x/y"
+
+    def test_non_dict_detail_replaced_with_patch(self):
+        """If a malformed line has a non-dict detail (e.g. None), the
+        patch wins — we don't crash on legacy/garbage rows."""
+        with tempfile.TemporaryDirectory() as tmp:
+            logger = EventLogger(tmp)
+            today = datetime.now().strftime("%Y-%m-%d")
+            target = Path(tmp) / "events" / f"{today}.jsonl"
+            target.write_text(
+                json.dumps({"event_id": "weird-id", "detail": None}) + "\n",
+                encoding="utf-8",
+            )
+            ok = logger.update_event_detail_by_id(
+                "weird-id", {"x": 1},
+            )
+            assert ok is True
+            with open(target) as fh:
+                obj = json.loads(fh.readline())
+            assert obj["detail"] == {"x": 1}
+            logger.close()
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 9. v0.9 Track 1 — _pending_downloads background sweeper (3-B)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestPendingDownloadsCleanup:
+    """v0.9 Track 1 (3-B) — periodic GC for the pending-downloads dict.
+
+    Replaces the previous "GC inline at register/lookup time" pattern
+    so memory bound is deterministic regardless of register frequency.
+    The lifecycle is owned by FSWatcher.start()/stop(); tests that
+    don't call start() pay zero overhead.
+    """
+
+    def _make_watcher(self, *, sweeper_interval: float = 0.05):
+        config = {
+            "security": {
+                "fs_watcher": {"watch_paths": ["/tmp"]},
+                "download_tracking": {
+                    "enabled": True,
+                    "join_window_seconds": 300,
+                    "sweeper_interval_seconds": sweeper_interval,
+                },
+            }
+        }
+        return FSWatcher(config, queue.Queue(maxsize=10))
+
+    def test_sweeper_drops_expired_entries(self):
+        watcher = self._make_watcher()
+        # Past deadline → expired.
+        watcher.register_download(
+            event_id="expired", output_path="/tmp/x",
+            deadline_epoch=int(__import__("time").time()) - 10,
+            date=datetime.now().date(),
+        )
+        # Future deadline → live.
+        watcher.register_download(
+            event_id="live", output_path="/tmp/y",
+            deadline_epoch=int(__import__("time").time()) + 300,
+            date=datetime.now().date(),
+        )
+        assert len(watcher._pending_downloads) == 2
+
+        # Direct sweep call (no thread needed for the unit assertion).
+        swept = watcher._sweep_pending_downloads()
+        assert swept == 1
+        # Live entry preserved; expired one dropped.
+        assert len(watcher._pending_downloads) == 1
+        live = next(iter(watcher._pending_downloads.values()))
+        assert live.event_id == "live"
+
+    def test_sweeper_thread_starts_and_stops(self, tmp_path):
+        # Real watch path so start() actually spawns the observer +
+        # sweeper instead of bailing on "no valid watch paths".
+        config = {
+            "security": {
+                "fs_watcher": {"watch_paths": [str(tmp_path)]},
+                "download_tracking": {
+                    "enabled": True,
+                    "sweeper_interval_seconds": 0.05,
+                },
+            }
+        }
+        watcher = FSWatcher(config, queue.Queue(maxsize=10))
+        watcher.start()
+        try:
+            assert watcher._sweeper_thread is not None
+            assert watcher._sweeper_thread.is_alive()
+        finally:
+            watcher.stop()
+        # After stop, the thread is joined and the slot cleared.
+        assert watcher._sweeper_thread is None
+
+    def test_sweeper_runs_periodically(self):
+        watcher = self._make_watcher(sweeper_interval=0.05)
+        # Pre-populate with an already-expired entry.
+        watcher.register_download(
+            event_id="expired", output_path="/tmp/x",
+            deadline_epoch=int(__import__("time").time()) - 10,
+            date=datetime.now().date(),
+        )
+        # Spin up just the sweeper (no observer needed for the
+        # behavior under test).
+        watcher._start_pending_sweeper()
+        try:
+            # Wait up to 1s for the tick to fire (interval 50ms).
+            deadline = time.monotonic() + 1.0
+            while (
+                watcher._pending_downloads
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.05)
+            assert watcher._pending_downloads == {}
+        finally:
+            watcher._stop_pending_sweeper()
+
+    def test_sweeper_preserves_live_entries(self):
+        watcher = self._make_watcher()
+        watcher.register_download(
+            event_id="live", output_path="/tmp/y",
+            deadline_epoch=int(__import__("time").time()) + 300,
+            date=datetime.now().date(),
+        )
+        for _ in range(5):
+            watcher._sweep_pending_downloads()
+        assert len(watcher._pending_downloads) == 1
+        assert "live" in {
+            e.event_id for e in watcher._pending_downloads.values()
+        }
+
+    def test_memory_bound_long_running(self):
+        """Simulate a long-running daemon registering 1000 expired
+        entries with no fs events arriving — the dict must drain to
+        empty after one sweep instead of growing unboundedly."""
+        watcher = self._make_watcher()
+        for i in range(1000):
+            watcher.register_download(
+                event_id=f"e{i}", output_path=f"/tmp/{i}",
+                deadline_epoch=int(__import__("time").time()) - 1,
+                date=datetime.now().date(),
+            )
+        assert len(watcher._pending_downloads) == 1000
+        watcher._sweep_pending_downloads()
+        assert watcher._pending_downloads == {}
+
+
+# ────────────────────────────────────────────────────────────────────────
+# 10. v0.9 Track 1 — _extract_url helper consolidation (3-C)
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestExtractUrlConsolidation:
+    """v0.9 Track 1 (3-C) — single ``_token_as_url`` helper used by
+    ``_extract_url``, ``_extract_curl_download``, and
+    ``_extract_wget_download``. Behavior must be identical across the
+    three call sites; this guard catches future drift.
+    """
+
+    def test_token_as_url_recognizes_plain_http(self):
+        from sentinel_mac.collectors.agent_log_parser import _token_as_url
+        assert _token_as_url("http://x.com/y") == "http://x.com/y"
+        assert _token_as_url("https://x.com/y") == "https://x.com/y"
+
+    def test_token_as_url_strips_quotes(self):
+        from sentinel_mac.collectors.agent_log_parser import _token_as_url
+        assert _token_as_url("'https://x.com/y'") == "https://x.com/y"
+        assert _token_as_url('"https://x.com/y"') == "https://x.com/y"
+
+    def test_token_as_url_rejects_non_url(self):
+        from sentinel_mac.collectors.agent_log_parser import _token_as_url
+        assert _token_as_url("/tmp/file") is None
+        assert _token_as_url("--output") is None
+        assert _token_as_url("") is None
+        assert _token_as_url("ftp://x.com/y") is None
+
+    def test_extract_url_uses_helper(self):
+        from sentinel_mac.collectors.agent_log_parser import _extract_url
+        # Mixed token list — first URL wins.
+        tokens = ["curl", "-o", "/tmp/x", "https://x.com/y"]
+        assert _extract_url(tokens) == "https://x.com/y"
+
+    def test_curl_branch_uses_helper(self):
+        # `_extract_curl_download` no longer hand-rolls startswith; it
+        # delegates to _token_as_url. Quote-wrapped URLs are recognized
+        # in the curl flag-loop body just like in the redirect-only
+        # branch.
+        result = _extract_download(
+            "curl '-o' '/tmp/x' 'https://x.com/y'"
+        )
+        assert result is not None
+        assert result["downloader"] == "curl"
+        assert result["source_url"] == "https://x.com/y"
+        assert result["output_path"] == "/tmp/x"
+
+    def test_wget_branch_uses_helper(self):
+        result = _extract_download(
+            "wget '-O' '/tmp/x' 'https://x.com/y'"
+        )
+        assert result is not None
+        assert result["downloader"] == "wget"
+        assert result["source_url"] == "https://x.com/y"
+
+    def test_redirect_only_branch_still_works(self):
+        # Regression guard: the redirect-only branch uses the list-
+        # variant _extract_url, which now delegates to _token_as_url.
+        result = _extract_download("curl https://x.com/y > /tmp/z.bin")
+        assert result is not None
+        assert result["source_url"] == "https://x.com/y"
+        assert result["output_path"] == "/tmp/z.bin"
+
+    def test_behavior_unchanged_on_24h_false_positive_case(self):
+        """The original PR #12 review called out that `curl URL` with
+        no save flag is NOT a download (~24h false-positive risk).
+        After the consolidation, this case still returns None."""
+        assert _extract_download("curl https://x.com/y") is None
+        # Even with quotes — must still be rejected because no save
+        # flag and no redirect.
+        assert _extract_download("curl 'https://x.com/y'") is None
