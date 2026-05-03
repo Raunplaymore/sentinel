@@ -24,20 +24,19 @@ pytest's own signal setup.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
 import threading
 import time
 from pathlib import Path
-from typing import Optional
 
 import pytest
 
 from sentinel_mac import core as core_mod
 from sentinel_mac.commands import context as ctx_cli
 from sentinel_mac.core import Sentinel
-
 
 # ── shared fixtures ───────────────────────────────────────────────
 
@@ -112,10 +111,8 @@ def _stop_sentinel(s: Sentinel) -> None:
     so a failed assertion does not leak a daemon thread into the next
     test.
     """
-    try:
+    with contextlib.suppress(Exception):
         s.stop()
-    except Exception:
-        pass
     if s._reload_worker is not None:
         s._reload_worker.join(timeout=2.0)
 
@@ -440,9 +437,9 @@ class TestSignalDaemonReload:
 
     def test_enum_frozen_set(self):
         # The exact three values frozen by ADR 0005 §D7.
-        assert ctx_cli.DAEMON_RELOAD_RESULTS == frozenset(
+        assert frozenset(
             {"applied", "skipped_not_running", "failed_unreachable"}
-        )
+        ) == ctx_cli.DAEMON_RELOAD_RESULTS
 
     def test_skipped_when_no_lock_file(
         self, tmp_path, isolated_home, monkeypatch

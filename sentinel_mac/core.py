@@ -5,39 +5,46 @@ Monitors system resources and sends smart alerts via ntfy.sh
 """
 
 import argparse as _argparse
+import contextlib
+import fcntl
 import json
 import logging
+import os
 import queue
 import re
 import signal
 import subprocess
 import sys
-import os
-import fcntl
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
-from logging.handlers import RotatingFileHandler
-
-# Re-export from new modules so existing imports (tests, sentinel.py) keep working
-from sentinel_mac.models import SystemMetrics, Alert, SecurityEvent  # noqa: F401
-from sentinel_mac.collectors.system import MacOSCollector  # noqa: F401
-from sentinel_mac.collectors.context import HostContext  # noqa: F401
-from sentinel_mac.collectors.project_context import ProjectContext  # noqa: F401
-from sentinel_mac.collectors.fs_watcher import FSWatcher  # noqa: F401
-from sentinel_mac.collectors.net_tracker import NetTracker  # noqa: F401
-from sentinel_mac.collectors.agent_log_parser import AgentLogParser  # noqa: F401
-from sentinel_mac.engine import AlertEngine  # noqa: F401
-from sentinel_mac.notifier import NtfyNotifier, NotificationManager, MacOSNotifier, SlackNotifier, TelegramNotifier  # noqa: F401
-from sentinel_mac.event_logger import EventLogger  # noqa: F401
 
 # ─────────────────────────────────────────────
 # Config Resolution
 # ─────────────────────────────────────────────
-
 import yaml
+
+from sentinel_mac.collectors.agent_log_parser import AgentLogParser  # noqa: F401
+from sentinel_mac.collectors.context import HostContext  # noqa: F401
+from sentinel_mac.collectors.fs_watcher import FSWatcher  # noqa: F401
+from sentinel_mac.collectors.net_tracker import NetTracker  # noqa: F401
+from sentinel_mac.collectors.project_context import ProjectContext  # noqa: F401
+from sentinel_mac.collectors.system import MacOSCollector  # noqa: F401
+from sentinel_mac.engine import AlertEngine  # noqa: F401
+from sentinel_mac.event_logger import EventLogger  # noqa: F401
+
+# Re-export from new modules so existing imports (tests, sentinel.py) keep working
+from sentinel_mac.models import Alert, SecurityEvent, SystemMetrics  # noqa: F401
+from sentinel_mac.notifier import (  # noqa: F401
+    MacOSNotifier,
+    NotificationManager,
+    NtfyNotifier,
+    SlackNotifier,
+    TelegramNotifier,
+)
 
 DEFAULT_CONFIG = {
     "ntfy_topic": "sentinel-default",
@@ -223,7 +230,7 @@ def try_acquire_daemon_lock():
     Returns the open file handle on success (caller must keep the reference
     alive — losing it releases the lock) or None if another process holds it.
     """
-    fp = open(daemon_lock_path(), "w")
+    fp = open(daemon_lock_path(), "w")  # noqa: SIM115 — daemon-lifetime fd; ownership is handed to the caller.
     try:
         fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -299,13 +306,11 @@ class Sentinel:
         # collector is instantiated. Single registration per process; the
         # reload worker (started below) does the actual reload work.
         if install_signal_handlers:
-            try:
+            # signal.signal is only legal from the main thread of the
+            # main interpreter. In embedded mode (menubar app, tests)
+            # this can be a no-op — kill -HUP simply will not fire.
+            with contextlib.suppress(ValueError, AttributeError):  # pragma: no cover — non-main thread
                 signal.signal(signal.SIGHUP, self._on_sighup)
-            except (ValueError, AttributeError):  # pragma: no cover — non-main thread
-                # signal.signal is only legal from the main thread of the
-                # main interpreter. In embedded mode (menubar app, tests)
-                # this can be a no-op — kill -HUP simply will not fire.
-                pass
 
         self.collector = MacOSCollector()
         self.engine = AlertEngine(self.config)
@@ -758,7 +763,7 @@ class Sentinel:
                 logging.info(
                     "CPU:{}% {}MEM:{}% DISK:{}% BAT:{}{}% AI:{}procs".format(
                         metrics.cpu_percent,
-                        "T:{}°C ".format(metrics.cpu_temp) if metrics.cpu_temp else "",
+                        f"T:{metrics.cpu_temp}°C " if metrics.cpu_temp else "",
                         metrics.memory_percent,
                         metrics.disk_percent,
                         "\U0001f50c" if metrics.battery_plugged else "\U0001f50b",
@@ -966,7 +971,7 @@ def _iter_event_lines(events_dir: Path, start_dt: datetime, end_dt: datetime):
     while cur <= end:
         filepath = events_dir / "{}.jsonl".format(cur.strftime("%Y-%m-%d"))
         if filepath.exists():
-            with open(filepath, "r", encoding="utf-8") as fh:
+            with open(filepath, encoding="utf-8") as fh:
                 for line in fh:
                     line = line.strip()
                     if line:
@@ -1166,9 +1171,9 @@ def _print_text_report(
         print("")
         print("=" * 50)
         print("  Sentinel Report")
-        print("  {}  |  severity: {}  |  source: {}".format(period_label, sev_label, src_label))
+        print(f"  {period_label}  |  severity: {sev_label}  |  source: {src_label}")
         if types is not None:
-            print("  type: {}".format(type_label))
+            print(f"  type: {type_label}")
         print("=" * 50)
         print("")
         print("  No events matched the selected filters.")
@@ -1186,19 +1191,19 @@ def _print_text_report(
     print("")
     print("=" * 50)
     print("  Sentinel Report")
-    print("  {}  |  severity: {}  |  source: {}".format(period_label, sev_label, src_label))
+    print(f"  {period_label}  |  severity: {sev_label}  |  source: {src_label}")
     if types is not None:
-        print("  type: {}".format(type_label))
+        print(f"  type: {type_label}")
     print("=" * 50)
     print("")
-    print("  Events: {} total".format(len(events)))
-    print("    Critical: {:>4}".format(len(critical)))
-    print("    Warning:  {:>4}".format(len(warning)))
-    print("    Info:     {:>4}".format(len(info)))
+    print(f"  Events: {len(events)} total")
+    print(f"    Critical: {len(critical):>4}")
+    print(f"    Warning:  {len(warning):>4}")
+    print(f"    Info:     {len(info):>4}")
     print("")
     print("  Top Sources:")
     for source, count in source_counts.most_common(5):
-        print("    {:<20s} {}".format(source, count))
+        print(f"    {source:<20s} {count}")
 
     if notable:
         print("")
@@ -1209,7 +1214,7 @@ def _print_text_report(
             target = e.get("target", "?")
             if len(target) > 60:
                 target = target[:57] + "..."
-            print("    {} | [{}] {}".format(ts, source, target))
+            print(f"    {ts} | [{source}] {target}")
 
     print("")
     print("=" * 50)
@@ -1327,7 +1332,9 @@ def _hook_check():
     """Called by Claude Code PreToolUse hook. Reads JSON from stdin, exits 0 (allow) or 2 (block)."""
     from sentinel_mac.collectors.agent_log_parser import HIGH_RISK_PATTERNS
     from sentinel_mac.collectors.typosquatting import (
-        check_typosquatting, extract_pip_packages, extract_npm_packages,
+        check_typosquatting,
+        extract_npm_packages,
+        extract_pip_packages,
     )
 
     try:
@@ -1377,7 +1384,7 @@ def _hook_check():
     if reasons:
         print(f"🚨 Sentinel blocked: {'; '.join(reasons)}")
         print(f"   Command: {command[:200]}")
-        print(f"   To allow, run manually or adjust Sentinel config.")
+        print("   To allow, run manually or adjust Sentinel config.")
         sys.exit(2)
 
     sys.exit(0)
@@ -1739,7 +1746,7 @@ thresholds:
 """
             config_file.write_text(config_content)
             print(f"Config created: {config_file}")
-            print(f"macOS native notifications enabled by default.")
+            print("macOS native notifications enabled by default.")
             print(f"Edit {config_file} to add ntfy.sh, Slack, or Telegram.")
         return
 
@@ -1747,10 +1754,10 @@ thresholds:
         collector = MacOSCollector()
         m = collector.collect()
         print(f"\n{'='*50}")
-        print(f"  Sentinel — System Snapshot")
+        print("  Sentinel — System Snapshot")
         print(f"  {m.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*50}")
-        cpu_temp = "  |  {}°C".format(m.cpu_temp) if m.cpu_temp else ""
+        cpu_temp = f"  |  {m.cpu_temp}°C" if m.cpu_temp else ""
         print(f"  CPU:     {m.cpu_percent}%{cpu_temp}")
         print(f"  Thermal: {m.thermal_pressure}")
         print(f"  Memory:  {m.memory_percent}% ({m.memory_used_gb}GB)")
@@ -1779,7 +1786,7 @@ thresholds:
             for p in m.ai_processes[:5]:
                 print(f"    {p['name']:20s} CPU:{p['cpu']:5.1f}%  MEM:{p['mem_mb']:.0f}MB")
         else:
-            print(f"\n  AI Processes: none detected")
+            print("\n  AI Processes: none detected")
         print(f"{'='*50}\n")
         return
 

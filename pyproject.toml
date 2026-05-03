@@ -61,26 +61,20 @@ line-length = 120
 target-version = "py38"
 
 [tool.ruff.lint]
-# Conservative starter set — enable more in v0.8 (E, F, W, I만 켬, 나머지는 v0.8 backlog)
-select = ["E", "F", "W", "I"]
-# Existing code may have long lines and bare-except; don't break HEAD on entry.
-# Re-evaluate in v0.8 with a ratchet PR.
+# v0.9 Track 2a ratchet — added B (bugbear), UP (pyupgrade), SIM (simplify).
+# B surfaces real bugs (mutable default args, raise-from missing, etc.).
+# UP modernizes syntax for the supported Python range (3.8+). SIM is a bonus
+# cleanup ruleset. Re-evaluate adding more (PT, RUF, etc.) in a future ratchet.
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+# Existing code may have long lines and bare-except; line length is enforced
+# loosely (120) and bare-except is occasionally intentional in best-effort
+# cleanup paths. E741 keeps single-letter loop vars allowed.
 ignore = ["E501", "E722", "E741"]
 
 [tool.ruff.lint.per-file-ignores]
-# tests/* sometimes import after path manipulation, and several legacy test
-# files have unused fixtures/imports that pre-date ruff. Tracked for cleanup
-# in v0.8 (see CHANGELOG Tooling note).
-"tests/*" = ["E402", "I001", "F401", "F841"]
-# Existing collectors / core / engine modules pre-date ruff. Track A & B
-# (v0.6) own these files and have parallel PRs in flight, so Track C does not
-# touch them. v0.8 ratchet PR will sort imports and drop unused names.
-"sentinel_mac/collectors/*.py" = ["I001", "F401"]
-"sentinel_mac/core.py" = ["I001", "F541"]
-"sentinel_mac/engine.py" = ["I001", "F841"]
-"sentinel_mac/models.py" = ["I001"]
-"sentinel_mac/notifier.py" = ["I001"]
-"sentinel_mac/menubar_app.py" = ["I001"]
+# tests/* import modules after sys.path manipulation in several places — the
+# `tests/conftest.py` style does not apply uniformly here, so E402 remains.
+"tests/*" = ["E402"]
 
 [tool.mypy]
 # requires-python is 3.8, but mypy 1.20 dropped 3.8 support. CI matrix runs

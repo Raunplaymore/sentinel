@@ -4,6 +4,7 @@ Monitors file access/modify/delete events using macOS FSEvents (via watchdog).
 Maps file events to AI processes using lsof (best-effort).
 """
 
+import contextlib
 import fnmatch
 import logging
 import os
@@ -12,16 +13,17 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from datetime import date as _date_cls, datetime
+from datetime import date as _date_cls
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
+from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
-from sentinel_mac.models import SecurityEvent
 from sentinel_mac.collectors.project_context import ProjectContext
 from sentinel_mac.collectors.system import MacOSCollector
+from sentinel_mac.models import SecurityEvent
 
 if TYPE_CHECKING:  # pragma: no cover
     from sentinel_mac.event_logger import EventLogger
@@ -136,7 +138,7 @@ class FSWatcher:
         self.join_window_seconds: int = join_window
         self._pending_downloads: dict[str, PendingDownload] = {}
         self._pending_lock = threading.Lock()
-        self._event_logger: Optional["EventLogger"] = None
+        self._event_logger: Optional[EventLogger] = None
 
         # v0.9 Track 1 (2026-05-03) — background sweeper for the
         # pending-downloads dict. The previous design only GC'd inside
@@ -547,9 +549,12 @@ class FSWatcher:
             return True
         # Check actual execute permission for files without extension
         try:
-            if os.path.exists(path) and os.access(path, os.X_OK):
-                if ext == "" or ext in _EXECUTABLE_EXTENSIONS:
-                    return True
+            if (
+                os.path.exists(path)
+                and os.access(path, os.X_OK)
+                and (ext == "" or ext in _EXECUTABLE_EXTENSIONS)
+            ):
+                return True
         except OSError:
             pass
         return False
@@ -697,10 +702,8 @@ class FSWatcher:
                     target=f"{count} files in {self._bulk_window}s",
                     detail=detail,
                 )
-                try:
+                with contextlib.suppress(queue.Full):
                     self._event_queue.put_nowait(event)
-                except queue.Full:
-                    pass
 
     # ── ADR 0007 D3+D5 — project_meta enrichment helpers ────────────
 
@@ -755,10 +758,12 @@ class FSWatcher:
         for p in paths:
             # Use 2-level parent for meaningful grouping
             parts = Path(p).parts
-            if len(parts) >= 4:
-                key = str(Path(*parts[:5]))  # e.g. /Users/user/projects/myapp
-            else:
-                key = str(Path(p).parent)
+            # e.g. /Users/user/projects/myapp when deep enough; else parent dir.
+            key = (
+                str(Path(*parts[:5]))
+                if len(parts) >= 4
+                else str(Path(p).parent)
+            )
             dir_counts[key] = dir_counts.get(key, 0) + 1
 
         return sorted(dir_counts, key=dir_counts.get, reverse=True)

@@ -1,14 +1,14 @@
 """Sentinel — Alert Engine."""
 
+import logging
 import re
 import time
-import logging
-from datetime import datetime
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from sentinel_mac.models import SystemMetrics, Alert, SecurityEvent
+from sentinel_mac.models import Alert, SecurityEvent, SystemMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -168,10 +168,7 @@ class AlertEngine:
         # before the engine ever sees them, but we still defensively
         # default here in case a test bypasses load_config).
         notif = config.get("notifications") or {}
-        if isinstance(notif, dict):
-            level = notif.get("context_level", "standard")
-        else:
-            level = "standard"
+        level = notif.get("context_level", "standard") if isinstance(notif, dict) else "standard"
         if level not in _VALID_CONTEXT_LEVELS:
             level = "standard"
         self._context_level: str = level
@@ -218,45 +215,44 @@ class AlertEngine:
         alerts = []
 
         # -- Battery Alerts --
-        if m.battery_percent is not None:
-            if not m.battery_plugged:
-                if m.battery_percent <= self.thresholds.get("battery_critical", 10):
-                    alerts.append(Alert(
-                        level="critical", category="battery_critical",
-                        title="\U0001faab Battery Critical",
-                        message=f"Battery at {m.battery_percent}% \u2014 plug in now!\n"
-                               f"{'~' + str(m.battery_minutes_left) + ' min remaining' if m.battery_minutes_left else ''}",
-                        emoji="\U0001f534", priority=5
-                    ))
-                elif m.battery_percent <= self.thresholds.get("battery_warning", 20):
-                    time_msg = f"\n~{m.battery_minutes_left} min remaining" if m.battery_minutes_left else ""
-                    ai_msg = f"\n{len(m.ai_processes)} AI process(es) running" if m.ai_processes else ""
-                    alerts.append(Alert(
-                        level="warning", category="battery_warning",
-                        title="\U0001f50b Battery Low",
-                        message=f"Battery {m.battery_percent}%, not charging{time_msg}{ai_msg}",
-                        emoji="\U0001f7e0", priority=4
-                    ))
+        if m.battery_percent is not None and not m.battery_plugged:
+            if m.battery_percent <= self.thresholds.get("battery_critical", 10):
+                alerts.append(Alert(
+                    level="critical", category="battery_critical",
+                    title="\U0001faab Battery Critical",
+                    message=f"Battery at {m.battery_percent}% \u2014 plug in now!\n"
+                           f"{'~' + str(m.battery_minutes_left) + ' min remaining' if m.battery_minutes_left else ''}",
+                    emoji="\U0001f534", priority=5
+                ))
+            elif m.battery_percent <= self.thresholds.get("battery_warning", 20):
+                time_msg = f"\n~{m.battery_minutes_left} min remaining" if m.battery_minutes_left else ""
+                ai_msg = f"\n{len(m.ai_processes)} AI process(es) running" if m.ai_processes else ""
+                alerts.append(Alert(
+                    level="warning", category="battery_warning",
+                    title="\U0001f50b Battery Low",
+                    message=f"Battery {m.battery_percent}%, not charging{time_msg}{ai_msg}",
+                    emoji="\U0001f7e0", priority=4
+                ))
 
-                # Rapid drain detection (time-based: %/hour)
-                if len(self._history) >= 3:
-                    oldest = self._history[0]
-                    elapsed_hours = (m.timestamp - oldest.timestamp).total_seconds() / 3600
-                    if (elapsed_hours > 0.01
-                            and oldest.battery_percent is not None
-                            and m.battery_percent is not None):
-                        drain_total = oldest.battery_percent - m.battery_percent
-                        drain_per_hour = drain_total / elapsed_hours
-                        threshold = self.thresholds.get("battery_drain_rate", 10)
-                        if drain_per_hour > threshold:
-                            alerts.append(Alert(
-                                level="warning", category="battery_drain",
-                                title="\u26a1 Rapid Battery Drain",
-                                message=f"Drain rate: {drain_per_hour:.1f}%/hr\n"
-                                       f"({drain_total:.1f}% lost in {elapsed_hours * 60:.0f} min)\n"
-                                       f"AI CPU usage: {m.ai_cpu_total:.0f}%",
-                                emoji="\U0001f7e0", priority=4
-                            ))
+            # Rapid drain detection (time-based: %/hour)
+            if len(self._history) >= 3:
+                oldest = self._history[0]
+                elapsed_hours = (m.timestamp - oldest.timestamp).total_seconds() / 3600
+                if (elapsed_hours > 0.01
+                        and oldest.battery_percent is not None
+                        and m.battery_percent is not None):
+                    drain_total = oldest.battery_percent - m.battery_percent
+                    drain_per_hour = drain_total / elapsed_hours
+                    threshold = self.thresholds.get("battery_drain_rate", 10)
+                    if drain_per_hour > threshold:
+                        alerts.append(Alert(
+                            level="warning", category="battery_drain",
+                            title="\u26a1 Rapid Battery Drain",
+                            message=f"Drain rate: {drain_per_hour:.1f}%/hr\n"
+                                   f"({drain_total:.1f}% lost in {elapsed_hours * 60:.0f} min)\n"
+                                   f"AI CPU usage: {m.ai_cpu_total:.0f}%",
+                            emoji="\U0001f7e0", priority=4
+                        ))
 
         # -- Thermal Alerts --
         if m.cpu_temp is not None:
@@ -617,7 +613,6 @@ class AlertEngine:
             # here as a defensive idempotent guard for callers that
             # bypass the collector (test fixtures, custom integrations).
             event.risk_score = 0.9
-            command = event.detail.get("command", event.target)
             alerts.append(Alert(
                 level="critical", category="agent_high_risk_command",
                 title="\U0001f6a8 High-Risk AI Command Detected",
@@ -782,9 +777,9 @@ class AlertEngine:
                     "level": level,
                 })
             except re.error as e:
-                logger.warning("Invalid custom rule regex '{}': {}".format(name, e))
+                logger.warning(f"Invalid custom rule regex '{name}': {e}")
         if rules:
-            logger.info("Loaded {} custom rule(s)".format(len(rules)))
+            logger.info(f"Loaded {len(rules)} custom rule(s)")
         return rules
 
     def _evaluate_custom_rules(self, event: SecurityEvent) -> list[Alert]:

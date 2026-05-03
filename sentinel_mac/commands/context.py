@@ -49,6 +49,7 @@ Design notes:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import json
 import os
@@ -58,7 +59,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable
 
 import yaml
 
@@ -78,7 +79,7 @@ from sentinel_mac.core import (
 # ── envelope / IO helpers ──────────────────────────────────────────
 
 
-def _resolve_config(arg_config: Optional[Path]) -> Optional[Path]:
+def _resolve_config(arg_config: Path | None) -> Path | None:
     """Wrap ``core.resolve_config_path`` so we can pass ``Optional[Path]``.
 
     ``core.resolve_config_path`` was written before strict typing landed
@@ -90,7 +91,7 @@ def _resolve_config(arg_config: Optional[Path]) -> Optional[Path]:
     return resolve_config_path(str(arg_config))
 
 
-def _load_config(config_path: Optional[Path]) -> dict:
+def _load_config(config_path: Path | None) -> dict:
     """Wrap ``core.load_config`` so callers can pass ``Optional[Path]``.
 
     ``core.load_config(None)`` already returns the default dict — same
@@ -126,7 +127,7 @@ def _err(msg: str) -> None:
 # ── host validation ────────────────────────────────────────────────
 
 
-def _validate_host(raw: Optional[str]) -> str:
+def _validate_host(raw: str | None) -> str:
     """Return a normalized host or raise ValueError.
 
     Normalization: ``strip().lower()``. Accepted shapes:
@@ -156,7 +157,7 @@ def _validate_host(raw: Optional[str]) -> str:
 # ── daemon detection ───────────────────────────────────────────────
 
 
-def _read_daemon_pid() -> Optional[int]:
+def _read_daemon_pid() -> int | None:
     """Return the PID recorded in ``sentinel.lock`` if a live daemon owns it.
 
     Reads the lock file (written by ``try_acquire_daemon_lock`` in
@@ -224,7 +225,7 @@ def _is_daemon_running() -> bool:
     if not lock_path.exists():
         return False
     try:
-        fp = open(lock_path, "a+")
+        fp = open(lock_path, "a+")  # noqa: SIM115 — explicit try/finally below; with-block reorganizes the early-return flow awkwardly.
     except OSError:
         return False
     try:
@@ -236,16 +237,12 @@ def _is_daemon_running() -> bool:
         except OSError:
             return False
         # We got the lock — nobody else has it. Release and report no daemon.
-        try:
+        with contextlib.suppress(OSError):
             fcntl.flock(fp, fcntl.LOCK_UN)
-        except OSError:
-            pass
         return False
     finally:
-        try:
+        with contextlib.suppress(OSError):
             fp.close()
-        except OSError:
-            pass
 
 
 # ADR 0005 §D7 — frozen enum returned by ``_signal_daemon_reload``.
@@ -255,7 +252,7 @@ DAEMON_RELOAD_RESULTS: frozenset[str] = frozenset(
 )
 
 
-def _signal_daemon_reload() -> tuple[str, Optional[int]]:
+def _signal_daemon_reload() -> tuple[str, int | None]:
     """ADR 0005 §D7 — signal the running daemon to reload its config.
 
     Returns ``(status, pid)`` where ``status`` is one of the three
@@ -288,7 +285,7 @@ def _signal_daemon_reload() -> tuple[str, Optional[int]]:
     return "applied", pid
 
 
-def _daemon_reload_notice(status: str, pid: Optional[int]) -> Optional[str]:
+def _daemon_reload_notice(status: str, pid: int | None) -> str | None:
     """Render the human-facing stderr line for a daemon-reload outcome.
 
     ADR 0005 §D7 message contract:
@@ -333,7 +330,7 @@ def _config_blocklist(config: dict) -> list:
     return [str(item) for item in raw if item]
 
 
-def _known_hosts_path_from_config(config: dict) -> Optional[Path]:
+def _known_hosts_path_from_config(config: dict) -> Path | None:
     """Resolve the configured known_hosts path (or None when explicitly off)."""
     section = (config or {}).get("security", {}).get("context_aware", {}) or {}
     raw = section.get("known_hosts_path", "~/.ssh/known_hosts")
@@ -343,7 +340,7 @@ def _known_hosts_path_from_config(config: dict) -> Optional[Path]:
 
 
 def _read_known_hosts_sample(
-    path: Optional[Path], *, sample_size: int = 8
+    path: Path | None, *, sample_size: int = 8
 ) -> tuple[int, list]:
     """Read known_hosts and return (total_count, sample).
 
@@ -363,7 +360,7 @@ def _read_known_hosts_sample(
     seen: set = set()
     sample: list = []
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(path, encoding="utf-8", errors="replace") as fh:
             for raw_line in fh:
                 parsed = _parse_known_hosts_line(raw_line)
                 if parsed is None:
@@ -446,7 +443,7 @@ def _status_snapshot(
     *,
     ctx: HostContext,
     config: dict,
-    config_path: Optional[Path],
+    config_path: Path | None,
     cache_path: Path,
     enabled: bool,
     as_json: bool,
@@ -541,7 +538,7 @@ def _status_single_host(
     *,
     ctx: HostContext,
     config: dict,
-    config_path: Optional[Path],
+    config_path: Path | None,
     cache_path: Path,
     enabled: bool,
     as_json: bool,
@@ -702,7 +699,7 @@ def _require_ruamel() -> Any:
     return yaml_rt
 
 
-def _resolve_yaml_backend() -> tuple[str, Optional[Any]]:
+def _resolve_yaml_backend() -> tuple[str, Any | None]:
     """ADR 0006 §D1 — pick the YAML backend at mutation time.
 
     Returns ``(backend_name, ruamel_yaml_instance_or_None)``:
@@ -746,21 +743,17 @@ def _save_config_with_pyyaml(config_path: Path, data: dict) -> str:
     epoch = int(time.time())
     backup_path = config_path.with_suffix(config_path.suffix + f".bak.{epoch}")
     shutil.copy2(config_path, backup_path)  # preserves mtime/perms (best-effort)
-    try:
+    # Permission tightening is advisory; if the FS rejects it (rare),
+    # the dump still proceeds — the warning already advises the user.
+    with contextlib.suppress(OSError):
         os.chmod(backup_path, 0o600)  # ADR 0006 §D5 — secrets-grade perms
-    except OSError:
-        # Permission tightening is advisory; if the FS rejects it (rare),
-        # the dump still proceeds — the warning already advises the user.
-        pass
 
     with open(config_path, "w", encoding="utf-8") as fh:
         yaml.safe_dump(
             data, fh, default_flow_style=False, sort_keys=False
         )
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(config_path, 0o600)
-    except OSError:
-        pass
 
     return str(backup_path)
 
@@ -854,10 +847,10 @@ def _mutate_blocklist(
     try:
         if backend == "ruamel":
             assert ruamel_yaml is not None  # narrow for mypy
-            with open(config_path, "r", encoding="utf-8") as fh:
+            with open(config_path, encoding="utf-8") as fh:
                 data = ruamel_yaml.load(fh)
         else:  # pyyaml
-            with open(config_path, "r", encoding="utf-8") as fh:
+            with open(config_path, encoding="utf-8") as fh:
                 data = yaml.safe_load(fh)
     except Exception as exc:  # noqa: BLE001 — surface any parse error
         _err(f"Error: failed to load {config_path}: {exc}")
@@ -924,7 +917,7 @@ def _mutate_blocklist(
     # Only flush to disk when something actually changed. A no-op write
     # would still be safe but generates needless mtime churn — and on
     # the PyYAML path it would also create an unnecessary backup.
-    backup_path: Optional[str] = None
+    backup_path: str | None = None
     if result in {"added", "removed"}:
         try:
             if backend == "ruamel":
@@ -1096,7 +1089,7 @@ def _add_common_flags(p: argparse.ArgumentParser) -> None:
     )
 
 
-def dispatch(argv: Optional[Iterable] = None) -> int:
+def dispatch(argv: Iterable | None = None) -> int:
     """Parse ``argv`` and run the matching subcommand. Returns the exit code.
 
     ``argv`` is the slice *after* the ``context`` token — i.e., when called

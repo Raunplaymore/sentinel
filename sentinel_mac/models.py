@@ -1,8 +1,8 @@
 """Sentinel — Data Models."""
 
 import uuid
-from datetime import datetime
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 
 

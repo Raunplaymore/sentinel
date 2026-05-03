@@ -16,7 +16,6 @@ from sentinel_mac.collectors.context import (
     TrustLevel,
 )
 
-
 # ─── helpers ───────────────────────────────────────────────────────
 
 

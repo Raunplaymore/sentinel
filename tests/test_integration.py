@@ -3,15 +3,12 @@ import json
 import os
 import queue
 import tempfile
-import pytest
 from datetime import datetime
-from unittest.mock import patch, MagicMock
 
-from sentinel_mac.models import SecurityEvent, Alert
+from sentinel_mac.core import DEFAULT_CONFIG
 from sentinel_mac.engine import AlertEngine
 from sentinel_mac.event_logger import EventLogger
-from sentinel_mac.core import DEFAULT_CONFIG
-
+from sentinel_mac.models import SecurityEvent
 
 # ─── EventLogger tests ───
 
@@ -425,5 +422,5 @@ class TestCustomRules:
         engine = AlertEngine(DEFAULT_CONFIG)
         assert len(engine._custom_rules) == 0
         event = self._make_event()
-        alerts = engine.evaluate_security_event(event)
+        engine.evaluate_security_event(event)
         # Should not crash

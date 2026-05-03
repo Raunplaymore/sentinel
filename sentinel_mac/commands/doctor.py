@@ -63,7 +63,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable
 
 from sentinel_mac.core import (
     CLAUDE_SETTINGS_PATH,
@@ -97,7 +97,7 @@ class CheckResult:
     name: str
     status: str  # one of STATUS_OK / STATUS_WARN / STATUS_FAIL / STATUS_INFO
     detail: str
-    remediation: Optional[str] = None
+    remediation: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in VALID_STATUSES:
@@ -222,7 +222,7 @@ def _check_daemon() -> CheckResult:
     )
 
 
-def _check_config(config_path: Optional[Path]) -> CheckResult:
+def _check_config(config_path: Path | None) -> CheckResult:
     """Resolve + parse ``config.yaml``; report missing/empty/invalid cleanly."""
     resolved = (
         config_path if config_path is not None else resolve_config_path()
@@ -432,7 +432,7 @@ def _check_host_context_cache() -> CheckResult:
     # Walk every line to confirm valid JSON; tolerate the _meta header.
     host_count = 0
     try:
-        with open(cache_path, "r", encoding="utf-8") as fh:
+        with open(cache_path, encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -541,7 +541,7 @@ def _check_optional_deps() -> CheckResult:
 # ── runner + summary ───────────────────────────────────────────────
 
 
-def _run_all_checks(config_path: Optional[Path]) -> list[CheckResult]:
+def _run_all_checks(config_path: Path | None) -> list[CheckResult]:
     """Execute every check, isolating exceptions into ``CheckResult(fail)``.
 
     Order is the canonical one used in both text and JSON output. A
@@ -727,7 +727,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def dispatch(argv: Optional[Iterable] = None) -> int:
+def dispatch(argv: Iterable | None = None) -> int:
     """Parse ``argv``, run every check, render, and return the exit code.
 
     Exit code is 0 when no FAIL row is present; 1 otherwise — WARN /
@@ -767,7 +767,7 @@ def _err(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
-def _resolve_config_for_cleanup(explicit: Optional[Path]) -> Optional[Path]:
+def _resolve_config_for_cleanup(explicit: Path | None) -> Path | None:
     """Resolve the config path for cleanup-mode without requiring it to
     parse — we only need its directory + filename to glob siblings.
 

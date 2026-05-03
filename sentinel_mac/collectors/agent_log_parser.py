@@ -24,14 +24,14 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from sentinel_mac.models import SecurityEvent
 from sentinel_mac.collectors.context import HostContext, TrustLevel
 from sentinel_mac.collectors.project_context import ProjectContext
 from sentinel_mac.collectors.typosquatting import (
     check_typosquatting,
-    extract_pip_packages,
     extract_npm_packages,
+    extract_pip_packages,
 )
+from sentinel_mac.models import SecurityEvent
 
 logger = logging.getLogger(__name__)
 
@@ -657,7 +657,7 @@ def _evaluate_download_risk(
     except (ValueError, TypeError):
         host = ""
 
-    trust: "TrustLevel"
+    trust: TrustLevel
     if host:
         host_ctx.observe(host)
         trust = host_ctx.classify(host)
@@ -905,7 +905,7 @@ class AgentLogParser:
             return
 
         try:
-            with open(file_path, "r") as f:
+            with open(file_path) as f:
                 f.seek(last_pos)
                 new_data = f.read()
                 self._file_positions[file_path] = f.tell()

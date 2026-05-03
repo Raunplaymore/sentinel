@@ -11,12 +11,10 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Optional
 
 import pytest
 
 from sentinel_mac.commands import context as ctx_cli
-
 
 # ── shared fixtures ───────────────────────────────────────────────
 
@@ -73,12 +71,12 @@ def _write_config(
     tmp_path: Path,
     *,
     enabled: bool,
-    cache_path: Optional[Path] = None,
-    known_hosts_path: Optional[Path] = None,
-    blocklist: Optional[list] = None,
+    cache_path: Path | None = None,
+    known_hosts_path: Path | None = None,
+    blocklist: list | None = None,
     name: str = "config.yaml",
-    extra_top_level: Optional[str] = None,
-    leading_comment: Optional[str] = None,
+    extra_top_level: str | None = None,
+    leading_comment: str | None = None,
 ) -> Path:
     """Write a YAML config under tmp_path. Returns the absolute path."""
     blocklist = blocklist or []

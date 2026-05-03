@@ -1,14 +1,13 @@
 """Tests for AlertEngine logic."""
 import time
+from datetime import datetime, timedelta
 
 import pytest
-from datetime import datetime, timedelta
 
 from sentinel_mac.core import (
     DEFAULT_CONFIG,
-    SystemMetrics,
-    Alert,
     AlertEngine,
+    SystemMetrics,
 )
 from sentinel_mac.models import SecurityEvent
 
@@ -681,8 +680,9 @@ class TestCtxBlockFormatting:
         assert lines[3].strip().startswith("What:")
 
     def test_cwd_under_home_uses_tilde(self):
-        from sentinel_mac.engine import _format_ctx_block
         from pathlib import Path
+
+        from sentinel_mac.engine import _format_ctx_block
         home = str(Path.home())
         block = _format_ctx_block({
             "session": {
