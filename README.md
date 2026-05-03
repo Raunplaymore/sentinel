@@ -152,10 +152,19 @@ Checks system resources every 30 seconds and detects problems before they become
 |     **Thermal**      | CPU temperature, thermal throttling     | Above 85C, throttling active            |
 |      **Memory**      | Usage, AI process memory consumption    | Above 90%                               |
 |       **Disk**       | Usage, remaining free space             | Above 90%                               |
-|    **AI Session**    | Process detection, runtime duration     | 3h+ continuous, suspected infinite loop |
+|    **AI Session**    | CPU vs network I/O ratio (5-tick window) | High CPU + near-zero network → suspected stuck process † |
 |     **Network**      | Transfer volume per interval            | Over 100MB spike                        |
 |   **Night Watch**    | Late-night session + battery state      | 12AM-6AM, unplugged, AI running         |
 | **Security Posture** | Firewall, Gatekeeper, FileVault         | Any protection disabled                 |
+
+> **†** The current "stuck process" heuristic does not yet account
+> for active user interaction — a long thinking pass on a local
+> model (e.g. ollama) or a batch job with no external API traffic
+> can false-positive even though the user is actively using the
+> session. Refining this to skip when the agent log shows recent
+> message activity (last ~5 min) is on the v0.9 roadmap; see
+> [`docs/proposals/v0.9-plan.md`](docs/proposals/v0.9-plan.md)
+> Track 3.
 
 ### Layer 2: AI Security Monitor
 
