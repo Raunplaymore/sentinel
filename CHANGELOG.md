@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (v0.9 freeze)
+- **ADR 0008 — Notification Context Level**. Freezes the new
+  `notifications.context_level` setting (`minimal` / `standard` /
+  `full`). Default `standard` matches v0.8.0 alert text exactly
+  (no upgrade-time surprise). `full` opts in to a `Repo:
+  owner/repo` line under `Project:`, narrowing the ADR 0007 §D7
+  "git.remote audit-log-only forever" commitment to "audit-log-only
+  in `minimal` and `standard` modes only". `minimal` strips the
+  entire `[ctx]` block from the alert body for privacy-strict
+  setups. Single global key (no per-channel granularity yet).
+  Validation is fail-soft (unknown value → `standard` + WARNING).
+  Implementation in v0.9 Track 3.
+- **ADR 0009 — Backup Retention Policy**. Freezes `sentinel doctor
+  --cleanup-backups --keep N`, the user-initiated counterpart to
+  ADR 0006 §D5's "backups never auto-deleted by the daemon". `--keep`
+  is mandatory (no safe default — explicit user intent required).
+  Selection sorts the `<config>.bak.<epoch>` files by the trailing
+  integer in the filename (mtime ignored). Interactive `[y/N]`
+  prompt by default, `--yes` to skip, `--dry-run` to preview.
+  JSON envelope `kind=backup_cleanup` matching ADR 0004 §D2.
+  Exit codes 0 / 1 / 2. Implementation in v0.9 Track 3.
+- **ADR 0007 §D4 amendment — mtime invalidation**. Adopts the
+  "v0.9 candidate" inline note: ProjectContext now stat()s
+  `<root>/.git/HEAD` on each `lookup()` and drops cached entries
+  when `st_mtime_ns` advances, so `git checkout`-driven
+  branch/head changes show up immediately instead of waiting for
+  the 5-min TTL. Additive amendment — public API unchanged, no
+  supersede required. The 5-min TTL stays as the second-line
+  guard for non-git changes.
+
 ## [0.8.0] - 2026-05-02
 
 The "polish + performance" release. Three themes — context-aware

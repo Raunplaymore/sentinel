@@ -223,11 +223,53 @@ warm entries. The corresponding row should be added to ADR 0005's
 D2 table by the implementation PR (cross-ADR documentation
 synchronization, not a supersede).
 
-**Known staleness**: branch switches (`git checkout`) are not
-reflected for up to 5 minutes (TTL). For dev workflows that switch
-branches often this can show stale `git.branch` / `git.head`. v0.9
-candidate: trigger-based invalidation by stat-ing `.git/HEAD` mtime
-on lookup and dropping the entry if it advanced.
+**Known staleness** (original v0.8 behavior): branch switches
+(`git checkout`) were not reflected for up to 5 minutes (TTL). For
+dev workflows that switch branches often this showed stale
+`git.branch` / `git.head` until TTL expired.
+
+#### D4 amendment — mtime invalidation (v0.9 Track 3)
+
+The "v0.9 candidate" trigger-based invalidation noted above is now
+adopted. Frozen behavior:
+
+- On every `lookup(cwd)` call, before returning the cached entry,
+  `os.stat()` `<root>/.git/HEAD` and compare its `st_mtime_ns` to
+  the value captured when the entry was cached.
+- If the file does not exist (project is not a git repo) → no
+  invalidation check, return cached entry as before.
+- If the file exists but `st_mtime_ns` differs from the cached
+  value → drop the entry and recompute the full `project_meta`
+  fresh, then cache with the new mtime.
+- If `os.stat()` raises (file removed mid-call, permission error,
+  etc.) → fall back to TTL behavior; do not surface the error to
+  the caller. Logged at DEBUG once per cwd per session.
+
+The mtime check is one extra `stat()` per cached `lookup()` —
+~µs cost on a warm filesystem cache. The original 5-min TTL stays
+in place as the second-line guard for non-git project changes (a
+new `pyproject.toml` line, etc.).
+
+`HostObservation`-style cache structures are unaffected — this
+amendment is ProjectContext-specific.
+
+This is an **additive** amendment — does not change the cache
+shape, the public `lookup` / `invalidate` API, or any other D4
+contract. Downstream code that did not opt into mtime invalidation
+sees exactly the same return value (just faster freshness for
+git-repo cwds). No supersede required.
+
+**Implementation hint** (for the v0.9 Track 3 PR): the new mtime
+check belongs in `project_context.py` `lookup()` immediately after
+the cache-hit branch finds an entry and before it returns. Add a
+private helper `_head_mtime_ns(root: Path) -> Optional[int]` that
+wraps `os.stat(root / ".git" / "HEAD").st_mtime_ns` in
+try/`OSError`-returns-`None`. Cache entries gain a `head_mtime_ns:
+Optional[int]` field captured at insert time; on lookup, recompute
+and compare — mismatch → drop and recompute. Tests should cover
+(a) non-git project skips the check, (b) `git checkout` between
+two lookups returns the new branch/head, (c) `os.stat` failure
+falls back to TTL behavior without raising.
 
 ### D5. Collector-by-collector enrichment policy
 
