@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (v0.9 Track 3b)
+- stuck_process false-positive fix (PR #28 follow-up): the
+  AlertEngine now consults the agent log parser's last
+  user/assistant message timestamp before firing the "Suspected
+  Stuck Process" warning. Active interactive sessions (local
+  models thinking, batch processing) with high CPU + low network
+  no longer false-positive when there has been agent activity in
+  the last 5 minutes. The heuristic still fires when the session
+  is truly idle (no recent messages + sustained high CPU + near-zero
+  network). Wired via a new `AlertEngine.set_agent_activity_callback`
+  setter; existing callers / tests that build a bare `AlertEngine`
+  see no behavior change because the callback defaults to None
+  (legacy CPU+net heuristic preserved).
+- `sentinel --version` now prints the config path, data dir,
+  daemon status (with PID when readable), and Claude Code hook
+  installation state in addition to the version string. The first
+  line still matches the legacy `sentinel-mac X.Y.Z` shape so
+  scripts that grep the version out keep working. Each subsequent
+  line is best-effort — missing files / permission errors degrade
+  to a short "not …" / "unknown" status instead of crashing the
+  command. Use this for fast sanity checks; `sentinel doctor` is
+  still the right surface for full diagnosis with remediation.
+
+### Changed (v0.9 Track 3b)
+- `install.sh` now opens with a comment recommending `pipx install
+  sentinel-mac` for most users while explicitly listing the cases
+  where install.sh is still the right choice (launchd auto-setup,
+  shell-alias install, source-tree development). The same nudge
+  appears as a one-line note under the README Quick Start
+  "Option 2" header. Per the Q3 user signal, install.sh remains
+  fully supported with no deprecation warning printed at runtime —
+  the comment / README note is the only behavior change.
+
 ### Added (v0.9 Track 3a)
 - ADR 0008 implementation: `notifications.context_level` config key
   with three values (`minimal` / `standard` / `full`). Default

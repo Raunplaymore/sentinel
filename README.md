@@ -59,6 +59,10 @@ Trade-off: you do not get the `install.sh` launchd auto-start step — see "Auto
 
 ### Option 2 — git clone + install.sh (scripted setup with launchd auto-start)
 
+> Recommended when you want the launchd plist set up automatically
+> or you're doing source-tree development. For most users, Option 1
+> (pipx) is simpler.
+
 ```bash
 git clone https://github.com/raunplaymore/sentinel.git
 cd sentinel

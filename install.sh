@@ -2,6 +2,21 @@
 # ───────────────────────────────────────
 # Sentinel — One-Command Installer
 # ───────────────────────────────────────
+#
+# This script remains supported. For most users, however, the simpler
+# path is:
+#
+#     pipx install sentinel-mac
+#     sentinel --init-config
+#     sentinel start
+#
+# Use install.sh when you specifically want one of:
+#   - the launchd plist set up automatically (auto-start on login)
+#   - the `sentinel` shell alias added to your rc file
+#   - source-tree development (live edits picked up via venv install)
+#
+# Otherwise pipx is recommended.
+#
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

@@ -3,8 +3,10 @@ import json
 import os
 import queue
 import tempfile
+import time
+
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from unittest.mock import patch
@@ -191,6 +193,169 @@ class TestAgentLogParserProcessing:
         event = q.get_nowait()
         assert event.timestamp.year == 2026
         assert event.timestamp.month == 3
+
+
+class TestAgentLogParserLastActivity:
+    """v0.9 Track 3b — last_user_or_assistant_activity_epoch contract.
+
+    Surfaces the most-recent user/assistant message timestamp so the
+    AlertEngine can suppress stuck_process false-positives during
+    active interactive sessions (PR #28 follow-up).
+
+    Contract:
+      - Initially returns None (no messages observed).
+      - user records advance the epoch.
+      - assistant records advance the epoch.
+      - Housekeeping records (queue-operation / last-prompt / summary
+        / permission-mode / file-history-snapshot) do NOT advance it.
+      - tool_result records (system echoes of tool runs) do NOT
+        advance it — they are not fresh user/assistant turns.
+    """
+
+    def _make_parser(self):
+        config = {
+            "security": {
+                "agent_logs": {
+                    "parsers": [
+                        {"type": "claude_code", "log_dir": "/tmp/nonexistent-test"}
+                    ]
+                }
+            }
+        }
+        q = queue.Queue(maxsize=100)
+        return AgentLogParser(config, q)
+
+    def test_initial_state_none(self):
+        parser = self._make_parser()
+        assert parser.last_user_or_assistant_activity_epoch() is None
+
+    def test_user_message_advances_epoch(self):
+        parser = self._make_parser()
+        line = json.dumps({
+            "type": "user",
+            "timestamp": "2026-05-03T12:00:00Z",
+            "message": {"content": "hello"},
+        })
+        parser.parse_line(line)
+        epoch = parser.last_user_or_assistant_activity_epoch()
+        assert epoch is not None
+        # The 2026-05-03T12:00:00Z timestamp should round-trip cleanly.
+        assert (
+            datetime.fromtimestamp(epoch, tz=timezone.utc)
+            == datetime(2026, 5, 3, 12, 0, 0, tzinfo=timezone.utc)
+        )
+
+    def test_assistant_message_advances_epoch(self):
+        parser = self._make_parser()
+        line = json.dumps({
+            "type": "assistant",
+            "timestamp": "2026-05-03T12:01:00Z",
+            "message": {
+                "content": [{"type": "text", "text": "hi"}],
+            },
+        })
+        parser.parse_line(line)
+        epoch = parser.last_user_or_assistant_activity_epoch()
+        assert epoch is not None
+        assert (
+            datetime.fromtimestamp(epoch, tz=timezone.utc)
+            == datetime(2026, 5, 3, 12, 1, 0, tzinfo=timezone.utc)
+        )
+
+    def test_housekeeping_does_not_advance(self):
+        parser = self._make_parser()
+        # Process a baseline assistant record so we have a "before" epoch.
+        baseline_line = json.dumps({
+            "type": "assistant",
+            "timestamp": "2026-05-03T12:00:00Z",
+            "message": {"content": [{"type": "text", "text": "hi"}]},
+        })
+        parser.parse_line(baseline_line)
+        before = parser.last_user_or_assistant_activity_epoch()
+        assert before is not None
+
+        # Each housekeeping type must NOT advance the epoch.
+        for hk_type in (
+            "queue-operation", "last-prompt", "summary",
+            "permission-mode", "file-history-snapshot",
+        ):
+            hk_line = json.dumps({
+                "type": hk_type,
+                # Future timestamp — if the implementation accidentally
+                # picked up housekeeping records, this would visibly
+                # advance the epoch.
+                "timestamp": "2026-05-03T13:00:00Z",
+            })
+            parser.parse_line(hk_line)
+
+        after = parser.last_user_or_assistant_activity_epoch()
+        assert after == before, (
+            "Housekeeping records (queue-operation / last-prompt / "
+            "summary / permission-mode / file-history-snapshot) must "
+            "not count as user-visible activity for the stuck_process "
+            "suppression heuristic."
+        )
+
+    def test_tool_result_does_not_advance(self):
+        """tool_result is a system echo, not a fresh user/assistant turn."""
+        parser = self._make_parser()
+        baseline_line = json.dumps({
+            "type": "assistant",
+            "timestamp": "2026-05-03T12:00:00Z",
+            "message": {"content": [{"type": "text", "text": "hi"}]},
+        })
+        parser.parse_line(baseline_line)
+        before = parser.last_user_or_assistant_activity_epoch()
+        assert before is not None
+
+        tool_result_line = json.dumps({
+            "type": "tool_result",
+            "timestamp": "2026-05-03T13:00:00Z",
+            "content": "ok",
+            "tool_use_id": "abc",
+        })
+        parser.parse_line(tool_result_line)
+        after = parser.last_user_or_assistant_activity_epoch()
+        assert after == before
+
+    def test_monotonic_under_replay(self):
+        """A backwards-dated record must not move the epoch backwards.
+
+        Defensive contract — if a malformed JSONL or replayed line
+        carries an older timestamp, we keep the most recent value.
+        """
+        parser = self._make_parser()
+        recent = json.dumps({
+            "type": "assistant",
+            "timestamp": "2026-05-03T12:05:00Z",
+            "message": {"content": [{"type": "text", "text": "hi"}]},
+        })
+        parser.parse_line(recent)
+        epoch_after_recent = parser.last_user_or_assistant_activity_epoch()
+
+        old = json.dumps({
+            "type": "assistant",
+            "timestamp": "2026-05-03T11:00:00Z",
+            "message": {"content": [{"type": "text", "text": "hi"}]},
+        })
+        parser.parse_line(old)
+        epoch_after_old = parser.last_user_or_assistant_activity_epoch()
+        assert epoch_after_old == epoch_after_recent
+
+    def test_missing_timestamp_falls_back_to_now(self):
+        parser = self._make_parser()
+        before_call = time.time()
+        line = json.dumps({
+            "type": "user",
+            # No "timestamp" field — implementation should fall back
+            # to time.time().
+            "message": {"content": "no timestamp"},
+        })
+        parser.parse_line(line)
+        epoch = parser.last_user_or_assistant_activity_epoch()
+        assert epoch is not None
+        assert epoch >= before_call - 1.0  # tiny clock-skew tolerance
+        assert epoch <= time.time() + 1.0
 
 
 class TestAgentLogParserLifecycle:
