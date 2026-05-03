@@ -591,3 +591,183 @@ class TestProjectContextFromConfig:
             ProjectContext(max_entries=0)
         with pytest.raises(ValueError):
             ProjectContext(max_walk_depth=0)
+
+
+# ─── ADR 0007 §D4 amendment — mtime invalidation ──────────────────
+
+
+class TestMtimeInvalidation:
+    """ADR 0007 §D4 amendment — drop cached entry when .git/HEAD mtime
+    advances. Public API unchanged; internal cache shape gained the
+    head_mtime_ns field."""
+
+    def test_non_git_project_skips_mtime_check(self, tmp_path):
+        """pyproject-only projects (no .git/) cache with head_mtime=None
+        and skip the mtime check entirely on subsequent lookups."""
+        proj = tmp_path / "p"
+        proj.mkdir()
+        _write_pyproject_pep621(proj, "nogit")
+
+        ctx = ProjectContext()
+        first = ctx.lookup(str(proj))
+        assert first is not None
+        # Cache entry should have head_mtime_ns=None.
+        with ctx._lock:
+            key = next(iter(ctx._cache))
+            _meta, _inserted, head_mtime = ctx._cache[key]
+        assert head_mtime is None
+
+        # A second lookup should hit the cache without recomputing.
+        with patch.object(
+            ProjectContext, "_resolve",
+            return_value={"name": "WRONG", "root": "/", "git": None},
+        ) as mocked:
+            second = ctx.lookup(str(proj))
+            assert mocked.call_count == 0
+        assert second["name"] == first["name"] == "nogit"
+
+    def test_git_head_mtime_recorded_on_insert(self, tmp_path):
+        """Git projects record .git/HEAD mtime at cache-insert time."""
+        proj = tmp_path / "p"
+        proj.mkdir()
+        _write_pyproject_pep621(proj, "git-project")
+        _make_git_dir(proj, head_ref="main")
+
+        ctx = ProjectContext()
+        ctx.lookup(str(proj))
+        with ctx._lock:
+            key = next(iter(ctx._cache))
+            _meta, _inserted, head_mtime = ctx._cache[key]
+        assert head_mtime is not None
+        assert isinstance(head_mtime, int)
+
+    def test_branch_switch_invalidates_cache(self, tmp_path):
+        """Simulating `git checkout` (mtime advance on .git/HEAD) drops
+        the cached entry and triggers a fresh resolve on next lookup."""
+        proj = tmp_path / "p"
+        proj.mkdir()
+        _write_pyproject_pep621(proj, "switching")
+        _make_git_dir(proj, head_ref="main")
+
+        ctx = ProjectContext()
+        first = ctx.lookup(str(proj))
+        assert first["git"]["branch"] == "main"
+
+        # Simulate `git checkout feature-x`: rewrite HEAD with a fresh
+        # mtime AND change the ref so the recompute returns a new branch.
+        # On most filesystems mtime resolution is sub-millisecond, but
+        # for safety we forcibly advance st_mtime via os.utime instead
+        # of sleeping.
+        import os as _os
+        head_path = proj / ".git" / "HEAD"
+        # Add a new branch ref + flip HEAD to it.
+        feat_ref_dir = proj / ".git" / "refs" / "heads"
+        feat_ref_dir.mkdir(parents=True, exist_ok=True)
+        (feat_ref_dir / "feature-x").write_text(
+            "1234567890abcdef1234567890abcdef12345678\n", encoding="utf-8"
+        )
+        head_path.write_text(
+            "ref: refs/heads/feature-x\n", encoding="utf-8"
+        )
+        # Force an mtime advance even on a coarse filesystem clock.
+        old_stat = _os.stat(head_path)
+        _os.utime(
+            head_path, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns + 10**9)
+        )
+
+        # Second lookup should detect the mtime change and recompute.
+        second = ctx.lookup(str(proj))
+        assert second["git"]["branch"] == "feature-x"
+
+    def test_unchanged_mtime_keeps_cache(self, tmp_path):
+        """When .git/HEAD is untouched between two lookups, the cache
+        hit path runs (no re-resolve)."""
+        proj = tmp_path / "p"
+        proj.mkdir()
+        _write_pyproject_pep621(proj, "stable")
+        _make_git_dir(proj, head_ref="main")
+
+        ctx = ProjectContext()
+        ctx.lookup(str(proj))
+
+        # Mock _resolve so a second call would be obvious.
+        with patch.object(
+            ProjectContext, "_resolve",
+            return_value={"name": "WRONG", "root": "/", "git": None},
+        ) as mocked:
+            ctx.lookup(str(proj))
+            # mtime unchanged → no recompute.
+            assert mocked.call_count == 0
+
+    def test_stat_failure_falls_back_to_ttl(self, tmp_path):
+        """When os.stat raises (e.g. .git/HEAD removed mid-session) the
+        amendment must NOT raise — it falls back to TTL behavior."""
+        proj = tmp_path / "p"
+        proj.mkdir()
+        _write_pyproject_pep621(proj, "stat-fail")
+        _make_git_dir(proj, head_ref="main")
+
+        ctx = ProjectContext()
+        ctx.lookup(str(proj))
+
+        # Patch the head_mtime helper to simulate an OSError from stat.
+        # A persistent failure must:
+        #   1. NOT raise to the caller.
+        #   2. NOT invalidate the cache (head_mtime returns None means
+        #      "skip the check").
+        import os as _os
+
+        def _raise(*_a, **_kw):
+            raise PermissionError("simulated EACCES on .git/HEAD")
+
+        with patch("sentinel_mac.collectors.project_context.os.stat", _raise):
+            # Should not raise.
+            second = ctx.lookup(str(proj))
+        # Same shape — no crash propagated.
+        assert second is not None
+        assert second["name"] == "stat-fail"
+
+    def test_ttl_still_works_when_mtime_unchanged(self, tmp_path):
+        """TTL is the second-line guard for non-git changes (e.g. a new
+        pyproject line). It still fires even when .git/HEAD is stable."""
+        proj = tmp_path / "p"
+        proj.mkdir()
+        _write_pyproject_pep621(proj, "ttl-fallback")
+        _make_git_dir(proj, head_ref="main")
+
+        ctx = ProjectContext(ttl_seconds=1)
+        ctx.lookup(str(proj))
+
+        # Fast-forward time so the TTL fires; mtime stays the same.
+        import time as _time
+        future = _time.monotonic() + 5.0
+        with patch(
+            "sentinel_mac.collectors.project_context.time.monotonic",
+            return_value=future,
+        ):
+            with patch.object(
+                ProjectContext, "_resolve",
+                return_value={"name": "FRESH", "root": str(proj), "git": None},
+            ) as mocked:
+                meta = ctx.lookup(str(proj))
+                # TTL expired → recompute happened.
+                assert mocked.call_count == 1
+        assert meta["name"] == "FRESH"
+
+    def test_head_mtime_helper_returns_none_for_missing_file(self, tmp_path):
+        """The private _head_mtime_ns helper returns None on
+        FileNotFoundError without logging (common case for non-git)."""
+        ctx = ProjectContext()
+        # Project with NO .git/ directory.
+        nogit = tmp_path / "nogit"
+        nogit.mkdir()
+        assert ctx._head_mtime_ns(nogit) is None
+
+    def test_head_mtime_helper_returns_int_for_real_head(self, tmp_path):
+        ctx = ProjectContext()
+        proj = tmp_path / "p"
+        proj.mkdir()
+        _make_git_dir(proj, head_ref="main")
+        result = ctx._head_mtime_ns(proj)
+        assert isinstance(result, int)
+        assert result > 0

@@ -19,14 +19,28 @@ logger = logging.getLogger(__name__)
 #
 # Privacy boundary (D7): `git.remote` is intentionally NOT surfaced in
 # the user-visible alert text — it stays in the audit log only.
+#
+# ADR 0008 D2 narrows that "audit-log-only forever" commitment to
+# `minimal` and `standard` modes only; `full` mode opts the user into
+# rendering `Repo: owner/repo` under the Project line. The privacy
+# default (standard) is unchanged from v0.8.0 — git.remote stays out
+# of the alert body unless the user explicitly sets full.
 
 # macOS Notification Center truncates around ~250 chars; the `What:`
 # line is the longest and most variable, so we cap it here. cwd gets
 # `~/` substitution under HOME for the same reason.
 _CTX_COMMAND_MAX_CHARS = 80
 
+# ADR 0008 D1 frozen three-state enum. The default ("standard") matches
+# v0.8.0 behavior verbatim; unknown values fall back to "standard"
+# defensively — config validation should have caught the typo upstream
+# (ADR 0008 D5) but the renderer never crashes on a bad level.
+_VALID_CONTEXT_LEVELS: frozenset[str] = frozenset(
+    {"minimal", "standard", "full"}
+)
 
-def _format_ctx_block(detail: dict) -> str:
+
+def _format_ctx_block(detail: dict, *, level: str = "standard") -> str:
     """ADR 0007 D6 — render the ``[ctx]`` block for an Alert message.
 
     Reads the ``session`` (D2) and ``project_meta`` (D3) sub-dicts from
@@ -36,17 +50,37 @@ def _format_ctx_block(detail: dict) -> str:
     Returns the empty string when neither block has anything to show —
     callers append unconditionally so it's safe to use ``message + ctx``.
 
+    ADR 0008 D4 — render the ``[ctx]`` block at the requested level:
+        - ``"minimal"`` → return ``""`` (drop entire block).
+        - ``"standard"`` → current v0.8 behavior (no git.remote).
+        - ``"full"`` → standard + ``Repo: owner/repo`` line under Project:
+          (only when ``project_meta.git.remote`` is non-null).
+
+    Unknown level values fall back to ``"standard"`` — defensive guard;
+    config validation (``_validate_config``) is the canonical filter.
+
     Output shape (each line indented 3 spaces to match the existing
     notification body convention):
 
         \\n
            Project: <name> (<branch> @ <head>)
+           Repo:    <owner>/<repo>          # full mode only
            Session: <model> #<id8> (CC <version>)
            Where:   <cwd>
            What:    <command>
 
-    Per ADR D7 the audit log keeps git.remote; this helper omits it.
+    Per ADR D7 / ADR 0008 D2 the audit log always keeps git.remote;
+    this helper omits it unless ``level == "full"``.
     """
+    # ADR 0008 D4 — minimal short-circuits before any work.
+    if level == "minimal":
+        return ""
+
+    # ADR 0008 D5 defensive — unknown values land on standard so a
+    # config-validation gap can never crash the renderer.
+    if level not in _VALID_CONTEXT_LEVELS:
+        level = "standard"
+
     if not isinstance(detail, dict):
         return ""
 
@@ -61,12 +95,20 @@ def _format_ctx_block(detail: dict) -> str:
         git = project.get("git") or {}
         branch = git.get("branch") if isinstance(git, dict) else None
         head = git.get("head") if isinstance(git, dict) else None
+        remote = git.get("remote") if isinstance(git, dict) else None
         if name and branch and head:
             lines.append(f"   Project: {name} ({branch} @ {head})")
         elif name and branch:
             lines.append(f"   Project: {name} ({branch})")
         elif name:
             lines.append(f"   Project: {name}")
+
+        # ADR 0008 D1 — `full` mode adds the Repo line directly under
+        # Project:. Only renders when git.remote is a non-empty string;
+        # null remote (private repo without a normalized GitHub-shaped
+        # URL) silently omits the line so the block stays clean.
+        if level == "full" and isinstance(remote, str) and remote:
+            lines.append(f"   Repo:    {remote}")
 
     # Session line: model #shortid (CC version) | model #shortid | model | #shortid
     if isinstance(session, dict):
@@ -118,6 +160,20 @@ class AlertEngine:
         self._session_start: Optional[datetime] = None
         self._idle_start: Optional[datetime] = None
         self._custom_rules = self._compile_custom_rules(config)
+        # ADR 0008 D4 — cache the context level once at construction so
+        # the per-event hot path doesn't re-walk the config dict on every
+        # alert. _validate_config is the single source of truth for the
+        # value (fail-soft: unknown values are normalized to "standard"
+        # before the engine ever sees them, but we still defensively
+        # default here in case a test bypasses load_config).
+        notif = config.get("notifications") or {}
+        if isinstance(notif, dict):
+            level = notif.get("context_level", "standard")
+        else:
+            level = "standard"
+        if level not in _VALID_CONTEXT_LEVELS:
+            level = "standard"
+        self._context_level: str = level
 
     def evaluate(self, m: SystemMetrics) -> list[Alert]:
         self._history.append(m)
@@ -319,7 +375,11 @@ class AlertEngine:
         # helper returns "" and the message is unchanged. Strict addition
         # to existing message text — preserves substring-based regression
         # tests (e.g., `assert "Risk: pipe to shell" in alert.message`).
-        ctx_block = _format_ctx_block(event.detail)
+        #
+        # ADR 0008 D4 — pass the cached context level so the renderer
+        # can render minimal (drop block entirely) / standard (v0.8
+        # default) / full (Repo line added).
+        ctx_block = _format_ctx_block(event.detail, level=self._context_level)
         if ctx_block:
             for alert in alerts:
                 alert.message = alert.message + ctx_block

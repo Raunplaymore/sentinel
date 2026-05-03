@@ -98,6 +98,15 @@ def resolve_data_dir() -> Path:
     return data_dir
 
 
+# ADR 0008 D1 frozen three-state enum for `notifications.context_level`.
+# Kept here (not imported from engine) so `_validate_config` can normalize
+# values before the engine is even constructed — the engine reads the
+# already-validated value at startup.
+_VALID_NOTIFICATION_CONTEXT_LEVELS: frozenset[str] = frozenset(
+    {"minimal", "standard", "full"}
+)
+
+
 def _validate_config(config: dict) -> dict:
     """Validate and clamp config values to safe ranges."""
     # Top-level numeric fields: (key, min, max, type)
@@ -127,15 +136,31 @@ def _validate_config(config: dict) -> dict:
     thresholds = config.get("thresholds", {})
     if not isinstance(thresholds, dict):
         config["thresholds"] = DEFAULT_CONFIG["thresholds"].copy()
-        return config
+    else:
+        for key, (lo, hi) in threshold_ranges.items():
+            val = thresholds.get(key)
+            if not isinstance(val, (int, float)) or val < lo:
+                thresholds[key] = DEFAULT_CONFIG["thresholds"][key]
+            elif val > hi:
+                thresholds[key] = hi
+        config["thresholds"] = thresholds
 
-    for key, (lo, hi) in threshold_ranges.items():
-        val = thresholds.get(key)
-        if not isinstance(val, (int, float)) or val < lo:
-            thresholds[key] = DEFAULT_CONFIG["thresholds"][key]
-        elif val > hi:
-            thresholds[key] = hi
-    config["thresholds"] = thresholds
+    # ADR 0008 D5 — fail-soft validation of `notifications.context_level`.
+    # Unknown / typo'd values fall back to "standard" + WARNING; never
+    # crash on a bad value here (the key is convenience plumbing, not a
+    # security gate). Missing key is silent — default is "standard".
+    notif = config.get("notifications")
+    if isinstance(notif, dict):
+        level = notif.get("context_level")
+        if level is not None and level not in _VALID_NOTIFICATION_CONTEXT_LEVELS:
+            logging.warning(
+                "Invalid notifications.context_level=%r; "
+                "falling back to 'standard'. Valid values: %s",
+                level,
+                sorted(_VALID_NOTIFICATION_CONTEXT_LEVELS),
+            )
+            notif["context_level"] = "standard"
+
     return config
 
 
@@ -485,6 +510,25 @@ class Sentinel:
         if security is not None and not isinstance(security, dict):
             raise ValueError("`security` must be a mapping")
 
+        # ADR 0008 D5 — fail-soft for notifications.context_level. ADR
+        # 0005 D3 explicitly says config reload is atomic-or-nothing: a
+        # bad context_level value must NOT abort the reload (it's a UI
+        # convenience, not structural). Mirror the load_config-time
+        # behavior — normalize the bad value to "standard" + WARNING
+        # instead of raising. Missing notifications dict is silent
+        # (engine treats absence as "standard" anyway).
+        notif = new_config.get("notifications")
+        if isinstance(notif, dict):
+            level = notif.get("context_level")
+            if level is not None and level not in _VALID_NOTIFICATION_CONTEXT_LEVELS:
+                logging.warning(
+                    "Invalid notifications.context_level=%r in reloaded "
+                    "config; falling back to 'standard'. Valid values: %s",
+                    level,
+                    sorted(_VALID_NOTIFICATION_CONTEXT_LEVELS),
+                )
+                notif["context_level"] = "standard"
+
     def _do_reload(self) -> None:
         """ADR 0005 D3 — atomic-or-nothing reload sequence.
 
@@ -566,6 +610,20 @@ class Sentinel:
             self.config = new_config
             self.host_ctx = new_host_ctx
             self.engine.thresholds = new_thresholds
+            # ADR 0008 D4 — refresh the engine's cached context_level so
+            # the new value takes effect on the next alert. Mirrors the
+            # construction-time logic in AlertEngine.__init__ (defensive
+            # default + frozen-enum check). _validate_reload_config
+            # already normalized invalid values to "standard".
+            new_notif = (
+                new_config.get("notifications") or {}
+                if isinstance(new_config.get("notifications"), dict)
+                else {}
+            )
+            new_level = new_notif.get("context_level", "standard")
+            if new_level not in _VALID_NOTIFICATION_CONTEXT_LEVELS:
+                new_level = "standard"
+            self.engine._context_level = new_level
             self._security_rules = new_security_rules
 
             # event_logger swap inside the same lock (D2 row): close the

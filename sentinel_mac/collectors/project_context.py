@@ -141,9 +141,20 @@ class ProjectContext:
         self._max_walk_depth: int = max_walk_depth
 
         # OrderedDict so we can move-to-end on hit and pop oldest on
-        # evict in O(1). Value: (cached_meta_dict_or_none, inserted_epoch).
-        self._cache: "OrderedDict[str, tuple[Optional[dict], float]]" = OrderedDict()
+        # evict in O(1). Value tuple shape (ADR 0007 §D4 + the §D4
+        # amendment additive field):
+        #   (cached_meta_dict_or_none, inserted_epoch, head_mtime_ns)
+        # head_mtime_ns is the st_mtime_ns of <root>/.git/HEAD captured
+        # at insert time, or None when the project has no .git/ (or the
+        # stat failed). On lookup, a non-None value is compared to the
+        # current st_mtime_ns; mismatch drops the entry and recomputes.
+        # Cache shape extension is internal — public API unchanged.
+        self._cache: "OrderedDict[str, tuple[Optional[dict], float, Optional[int]]]" = OrderedDict()
         self._lock: threading.RLock = threading.RLock()
+        # ADR 0007 §D4 amendment — track which cwds have already logged a
+        # stat failure this session, so the DEBUG line lands once per
+        # cwd rather than per-lookup.
+        self._stat_failure_logged: set[str] = set()
 
     @classmethod
     def from_config(cls, config: dict) -> "ProjectContext":
@@ -233,28 +244,95 @@ class ProjectContext:
         with self._lock:
             cached = self._cache.get(normalized)
             if cached is not None:
-                meta, inserted_at = cached
-                if now - inserted_at <= self._ttl_seconds:
+                meta, inserted_at, cached_head_mtime = cached
+                # ADR 0007 §D4 amendment — mtime invalidation. Only fires
+                # when the cached entry has a recorded head_mtime (i.e.
+                # the project had a .git/ at insert time). Non-git
+                # projects (head_mtime=None) skip this check entirely
+                # and fall through to the existing TTL guard.
+                if cached_head_mtime is not None and isinstance(meta, dict):
+                    root_str = meta.get("root")
+                    if isinstance(root_str, str) and root_str:
+                        current_mtime = self._head_mtime_ns(Path(root_str))
+                        if (
+                            current_mtime is not None
+                            and current_mtime != cached_head_mtime
+                        ):
+                            # .git/HEAD changed (e.g. git checkout) —
+                            # drop and recompute. Logged at DEBUG once
+                            # per cwd per session to avoid log spam.
+                            logger.debug(
+                                ".git/HEAD mtime changed for %s; "
+                                "invalidating ProjectContext cache entry",
+                                root_str,
+                            )
+                            self._cache.pop(normalized, None)
+                            cached = None
+
+                if cached is not None and now - inserted_at <= self._ttl_seconds:
                     # LRU bump on hit.
                     self._cache.move_to_end(normalized)
                     return self._apply_branch_hint(meta, branch_hint)
-                # Stale — drop and fall through to re-resolve.
+                # Stale (TTL or mtime) — drop and fall through.
                 self._cache.pop(normalized, None)
 
-        # Cache miss (or expired) — resolve outside the lock to avoid
-        # holding the lock across filesystem reads. We accept the rare
-        # double-resolve race; whichever caller stores last wins (the
-        # results are identical anyway when there's no concurrent fs change).
+        # Cache miss (or expired / mtime-invalidated) — resolve outside
+        # the lock to avoid holding the lock across filesystem reads. We
+        # accept the rare double-resolve race; whichever caller stores
+        # last wins (the results are identical anyway when there's no
+        # concurrent fs change).
         resolved = self._resolve(normalized)
 
+        # Capture the .git/HEAD mtime at insert time so the next lookup
+        # can detect a branch switch via the §D4 amendment path. None
+        # for non-git projects or stat failures.
+        head_mtime: Optional[int] = None
+        if isinstance(resolved, dict):
+            root_str = resolved.get("root")
+            if isinstance(root_str, str) and root_str:
+                head_mtime = self._head_mtime_ns(Path(root_str))
+
         with self._lock:
-            self._cache[normalized] = (resolved, now)
+            self._cache[normalized] = (resolved, now, head_mtime)
             self._cache.move_to_end(normalized)
             # LRU eviction.
             while len(self._cache) > self._max_entries:
                 self._cache.popitem(last=False)
 
         return self._apply_branch_hint(resolved, branch_hint)
+
+    def _head_mtime_ns(self, root: Path) -> Optional[int]:
+        """ADR 0007 §D4 amendment — return ``st_mtime_ns`` of
+        ``<root>/.git/HEAD`` or None.
+
+        Returns None when the file does not exist (project is not a git
+        repo, or the .git/ dir was removed mid-session) and also when
+        ``os.stat`` raises any OSError (permission denied, race
+        condition, etc.). All failures are silent at the API boundary
+        — the §D4 amendment falls back to the 5-min TTL behavior in
+        that case. A single DEBUG line is emitted per cwd per session
+        so a persistent stat failure is observable without flooding
+        the log.
+        """
+        head_path = root / ".git" / "HEAD"
+        try:
+            return os.stat(head_path).st_mtime_ns
+        except FileNotFoundError:
+            # Common case: project is not a git repo (no .git/HEAD).
+            # Do NOT log — this is the expected path for pyproject /
+            # package.json-only projects.
+            return None
+        except OSError as exc:
+            key = str(root)
+            if key not in self._stat_failure_logged:
+                self._stat_failure_logged.add(key)
+                logger.debug(
+                    "ProjectContext: stat(.git/HEAD) failed for %s: %s "
+                    "(falling back to TTL behavior)",
+                    root,
+                    exc,
+                )
+            return None
 
     def invalidate(self, cwd: Optional[str] = None) -> None:
         """Drop one cache entry (when ``cwd`` given) or the whole cache.

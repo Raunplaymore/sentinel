@@ -343,6 +343,29 @@ The same enrichment lands on the JSONL audit row, so
 `sentinel --report --json` consumers can group / filter events by
 project, session, or model trivially.
 
+**Tuning the `[ctx]` block** (v0.9, ADR 0008). The verbosity of the
+block is controlled by `notifications.context_level` in `config.yaml`:
+
+```yaml
+notifications:
+  context_level: standard   # minimal | standard | full
+```
+
+- `minimal` — drop the entire `[ctx]` block from notification messages.
+  The JSONL audit log is unaffected (full context still recorded). For
+  privacy-strict users who treat notification channels as untrusted.
+- `standard` — the v0.8 default behavior shown above. `git.remote`
+  stays in the audit log only.
+- `full` — same as `standard` plus a `Repo: owner/repo` line directly
+  under `Project:`. Opt-in escape hatch for solo developers on
+  single-org repos who want the GitHub identity surfaced in the alert
+  itself (you are posting your repo identity through your notification
+  channels — only opt in if that is OK with you).
+
+Default is `standard` (no upgrade-time surprise from v0.8.0). Unknown
+values fall back to `standard` with a startup `WARNING` (fail-soft —
+ADR 0008 D5).
+
 #### Custom Rules (Advanced)
 
 Define your own regex-based detection rules in `config.yaml`. Rules are matched against event targets and details from any collector.

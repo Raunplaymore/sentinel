@@ -29,6 +29,17 @@ notifications:
   telegram_bot_token: ""       # Telegram Bot token (set to enable)
   telegram_chat_id: ""         # Telegram chat ID
 
+  # Alert message context level (ADR 0008, default: standard).
+  #   minimal  - drop the [ctx] block from alerts (Project/Session/Where/What
+  #              lines NOT shown in notifications). JSONL audit log unaffected.
+  #   standard - current behavior: Project/Session/Where/What lines shown
+  #              EXCLUDING git.remote (avoids leaking private repo identity to
+  #              opt-in notification channels — ntfy/Slack/Telegram).
+  #   full     - same as standard PLUS a "Repo: owner/repo" line under Project:
+  #              (only opt in if you are OK posting your repo identity through
+  #              your notification channels).
+  context_level: standard
+
 # ── Thresholds ──
 thresholds:
   # Battery
