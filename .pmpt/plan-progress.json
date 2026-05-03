@@ -1,12 +1,12 @@
 {
   "completed": true,
   "startedAt": "2026-02-27T14:08:25.243Z",
-  "updatedAt": "2026-02-27T14:08:25.243Z",
+  "updatedAt": "2026-05-03T00:11:14.425Z",
   "answers": {
     "projectName": "sentinel",
     "productIdea": "watch things for safe computing.",
     "additionalContext": "Existing project with established codebase.\n- Git history: 2 commits since 2026-02-27, 1 contributor(s)\n- Recent work: \"Translate README to English + add social preview image\", \"Initial release v0.1.0 — AI Session Guardian for macOS\"",
     "coreFeatures": "Existing project features",
-    "techStack": ""
+    "techStack": "Python 3.8+ (requires-python pinned for backward compat); core deps: psutil (system metrics), pyyaml (config), watchdog (FSEvents), requests (ntfy/Slack); optional [app] extra: rumps (menubar), ruamel.yaml (comment-preserving config edit); dev tooling: pytest, ruff (lint), mypy (type-check, lenient — strict ratchet planned for v0.9); CI: GitHub Actions on macos-latest × Python 3.9–3.13 matrix; release: PyPI Trusted Publishing via release-published trigger (no API tokens). macOS-only by design (FSEvents, lsof, launchd); Linux/Windows port deferred to v0.10+."
   }
 }

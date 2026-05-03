@@ -1,164 +1,80 @@
 <!-- This file is for AI tools only. Do not edit manually. -->
 <!-- Paste this into Claude Code, Codex, Cursor, or any AI coding tool. -->
 
-# Sentinel -- AI Agent Security Guardian for macOS
+# sentinel — Product Development Request
 
-## What This Project Is
+## What I Want to Build
+watch things for safe computing.
 
-Sentinel is a macOS daemon that monitors system resources AND AI agent behavior, sending smart alerts when something critical happens. It has two layers:
+## Additional Context
+Existing project with established codebase.
+- Git history: 2 commits since 2026-02-27, 1 contributor(s)
+- Recent work: "Translate README to English + add social preview image", "Initial release v0.1.0 — AI Session Guardian for macOS"
 
-1. **System Layer** -- CPU, battery, thermal, memory, disk, network monitoring with configurable thresholds
-2. **AI Security Layer** -- file system watching, network connection tracking, and AI agent log parsing to detect risky behavior
+## Key Features
+- Existing project features
 
-The project is a solo developer tool now, with a clear path to team/enterprise (Phase 2: team dashboard via JSONL event upload).
-
-## Current State (v8 snapshot, 155 tests passing)
-
-All core features implemented:
-- **3 security collectors**: FSWatcher, NetTracker, AgentLogParser
-- **Multi-channel notifications**: macOS native (default), ntfy.sh (opt-in), Slack (opt-in)
-- **Critical-only alerting**: only critical events push notifications; warning/info are JSONL-logged only
-- **JSONL event audit log**: all SecurityEvents recorded to daily files for Phase 2 prep
-- **Integration tests**: end-to-end event flow verified
-
-## Project Structure
-
-```
-sentinel_mac/
-  core.py                  -- Sentinel daemon, config resolution, CLI entry point
-                              Re-exports all symbols from submodules for backward compatibility
-  models.py                -- SystemMetrics, Alert, SecurityEvent dataclasses
-  engine.py                -- AlertEngine: evaluates metrics + security events, generates Alerts
-                              Dispatches by source: _evaluate_fs_event, _evaluate_net_event, _evaluate_agent_log_event
-  notifier.py              -- NotificationManager + channel backends:
-                              MacOSNotifier (osascript), NtfyNotifier (HTTP), SlackNotifier (webhook)
-                              Core rule: only critical alerts are pushed. Warning/info logged only.
-  event_logger.py          -- EventLogger: append-only daily JSONL files for audit trail
-  collectors/
-    system.py              -- MacOSCollector: psutil + macOS native commands (pmset, powermetrics, etc.)
-    fs_watcher.py          -- FSWatcher: watchdog Observer in background thread
-                              Sensitive paths, AI process detection, executable detection, bulk change detection
-    net_tracker.py         -- NetTracker: polling-based, runs in main loop (not threaded)
-                              Allowlist with fnmatch wildcards, reverse DNS cache, 5-min dedup TTL
-    agent_log_parser.py    -- AgentLogParser: background thread, 3s polling interval
-                              Tail-f style reading, HIGH_RISK_PATTERNS regex, tool_use parsing
-
-tests/
-  test_alerts.py           -- 26 tests: battery, thermal, memory, disk, network, session, security posture
-  test_config.py           -- 11 tests: config loading, validation, path resolution
-  test_notifier.py         -- 23 tests: NtfyNotifier (5), MacOSNotifier (4), SlackNotifier (2), NotificationManager (12)
-  test_fs_watcher.py       -- 27 tests: filtering, AI detection, event handling, lifecycle, alert conversion
-  test_net_tracker.py      -- 23 tests: allowlist, AI detection, DNS, polling, alert evaluation
-  test_agent_log_parser.py -- 31 tests: high-risk patterns, JSONL processing, lifecycle, tail-f, alerts
-  test_integration.py      -- 11 tests: EventLogger (6), end-to-end security event flow (5)
-
-config.yaml                -- Full configuration with notifications + security sections
-.pmpt/docs/
-  pmpt.md                  -- Human-facing project document (progress, 12 architecture decisions)
-  ai-security-layer-spec.md -- Original spec document for the AI security layer
-```
-
-## Key Architecture Decisions (reference pmpt.md AD-1 through AD-12)
-
-1. **Layered Architecture (AD-1)**: System layer (unchanged) + AI Security layer (new modules).
-2. **Modular refactor (AD-2)**: core.py split into 5 modules, re-exports for backward compatibility.
-3. **SecurityEvent common model (AD-3)**: All 3 collectors emit the same dataclass. `detail: dict` for flexibility.
-4. **watchdog for FSEvents (AD-4)**: Combined with lsof for best-effort process attribution.
-5. **queue.Queue event bus (AD-5)**: Thread-safe, stdlib-only. maxsize=1000 as safety valve.
-6. **Polling for NetTracker (AD-6)**: psutil.net_connections is snapshot-only. No extra thread.
-7. **Tail-f polling for AgentLogParser (AD-7)**: 3s interval, skips pre-existing content on first scan.
-8. **Pre-compiled regex (AD-8)**: 14 HIGH_RISK_PATTERNS compiled at module load.
-9. **Category-based cooldown (AD-9)**: Critical gets 1/3 shorter cooldown.
-10. **Re-export pattern (AD-10)**: `from sentinel_mac.core import X` still works after refactor.
-11. **JSONL event logging (AD-11)**: Daily rotation, all events logged regardless of alert level.
-12. **Multi-channel + Critical-only (AD-12)**: macOS native default, "value means enabled" pattern, critical-only push.
-
-## Runtime Flow
-
-```
-Main loop (30s):
-  1. MacOSCollector.collect() -> SystemMetrics
-  2. AlertEngine.evaluate(metrics) -> [Alert]
-  3. NetTracker.poll() -> SecurityEvent -> queue
-  4. _process_security_events():
-     - drain queue -> EventLogger.log(event)  [JSONL]
-     - AlertEngine.evaluate_security_event() -> [Alert]
-  5. NotificationManager.send(alert)  [critical only → channels, warning/info → log]
-  6. NotificationManager.send_status(metrics) if interval elapsed  [bypasses level filter]
-
-Background threads:
-  - FSWatcher: watchdog Observer -> _handle_fs_event() -> SecurityEvent -> queue
-  - AgentLogParser: 3s poll -> _scan_claude_code_logs() -> parse_line() -> SecurityEvent -> queue
-```
-
-## Config Structure (config.yaml)
-
-```yaml
-# Top-level
-check_interval_seconds: 30
-status_interval_minutes: 60
-cooldown_minutes: 10
-
-# Notifications — "value means enabled" pattern
-notifications:
-  macos: true                    # Default, no setup needed
-  ntfy_topic: ""                 # Set value → ntfy enabled
-  ntfy_server: "https://ntfy.sh"
-  slack_webhook: ""              # Set URL → Slack enabled
-
-# Thresholds
-thresholds:
-  battery_warning/critical/drain_rate, temp_warning/critical,
-  memory_critical, disk_critical, network_spike_mb, session_hours_warning
-
-# Security layer
-security:
-  enabled: true
-  fs_watcher: { watch_paths, sensitive_paths, ignore_patterns, bulk_threshold/window }
-  net_tracker: { alert_on_unknown, allowlist }
-  agent_logs: { parsers: [{type, log_dir}] }
-```
-
-Legacy support: top-level `ntfy_topic` still works if `notifications.ntfy_topic` is not set.
-
-## Dependencies
-
-Runtime: psutil>=5.9, pyyaml>=6.0, requests>=2.28, watchdog>=3.0
-Dev: pytest>=7.0
-
-## Conventions
-
-- Tests use `queue.Queue` + direct method calls for unit testing (no threads needed)
-- Config passed as dict to all constructors
-- SecurityEvent.source determines which AlertEngine._evaluate_*_event() handles it
-- Alert.category used for cooldown deduplication
-- Alert.level determines notification behavior: critical → push, warning/info → log only
-- All security collectors gracefully handle missing paths/permissions (warn, don't crash)
-- NotificationManager auto-detects channels from config values (no explicit enable flags)
-
-## What's Next (macOS 집중, Linux 미지원 — AD-13)
-
-1. **MCP 인젝션 감지** -- AgentLogParser 확장, MCP 서버 호출에서 인젝션 패턴 탐지. Sentinel 핵심 차별점.
-2. **pyproject.toml 버전 업데이트** -- security layer 추가 + watchdog 의존성 반영
-3. **README 업데이트** -- AI Security Layer 기능 문서화
-4. **Cursor / VS Code Continue 로그 파서** -- AgentLogParser에 parser type 추가
-5. **Team dashboard** -- JSONL upload + web aggregation (Phase 2, 후순위)
+## Tech Stack Preferences
+Python 3.8+ (requires-python pinned for backward compat); core deps: psutil (system metrics), pyyaml (config), watchdog (FSEvents), requests (ntfy/Slack); optional [app] extra: rumps (menubar), ruamel.yaml (comment-preserving config edit); dev tooling: pytest, ruff (lint), mypy (type-check, lenient — strict ratchet planned for v0.9); CI: GitHub Actions on macos-latest × Python 3.9–3.13 matrix; release: PyPI Trusted Publishing via release-published trigger (no API tokens). macOS-only by design (FSEvents, lsof, launchd); Linux/Windows port deferred to v0.10+.
 
 ---
 
+Please help me build this product based on the requirements above.
+
+1. First, review the requirements and ask if anything is unclear.
+2. Propose a technical architecture.
+3. Outline the implementation steps.
+4. Start coding from the first step.
+
+I'll confirm progress at each step before moving to the next.
+
 ## Documentation Rule
 
-**Important:** When you make progress, update `.pmpt/docs/pmpt.md` at these moments:
-- When architecture or tech decisions are finalized (add to Architecture Decisions with rationale)
-- When a feature is implemented (mark as done in Progress)
-- When a development phase is completed (add to Snapshot Log with test count)
+**Important:** When you make progress, update `.pmpt/docs/pmpt.md` (the human-facing project document) at these moments:
+- When architecture or tech decisions are finalized
+- When a feature is implemented (mark as done)
+- When a development phase is completed
 - When requirements change or new decisions are made
 
 Keep the Progress and Snapshot Log sections in pmpt.md up to date.
-After significant milestones, run `pmpt save` to create a snapshot.
+After significant milestones, save a snapshot using the method below.
+
+### Saving Snapshots
+
+**Always save proactively after milestones — do not wait for the user to ask.**
+
+Try the pmpt MCP tool first:
+- Claude Code: call `mcp__pmpt__pmpt_save` with a descriptive `summary`
+- Other MCP clients: call `pmpt_save` with a descriptive `summary`
+
+If no MCP tool is available, run `pmpt save` in the terminal.
 
 ### Per-Feature Checklist
-After completing each feature:
-1. Mark the feature done in `.pmpt/docs/pmpt.md`
+After completing each feature above:
+1. Mark the feature done in `.pmpt/docs/pmpt.md` (change `- [ ]` to `- [x]`)
 2. Add a brief note to the Snapshot Log section
-3. Run `pmpt save` in terminal
+3. Call `mcp__pmpt__pmpt_save` (or `pmpt save` in terminal) with a summary
+
+### What to Record in pmpt.md
+
+pmpt.md is the **single source of truth** for this project. AI tools read it to understand context before every session. Keep it accurate.
+
+**## Architecture** — High-level structure. Update when the architecture changes.
+- Example: `Next.js (SSG) → Cloudflare Workers API → D1 database`
+- Include the WHY if the stack choice was non-obvious
+
+**## Active Work** — What's currently being built. One or two items max.
+- Clear this section when done, then move to Snapshot Log
+- Example: `- Implementing user auth (started 2025-03-17)`
+
+**## Decisions** — Record WHY, not just WHAT. Include what led to the decision.
+- Bad: "Switched to SQLite"
+- Good: "Switched SQLite → Postgres: deploy target moved to serverless, needed connection pooling"
+
+**## Constraints** — Platform or library limitations discovered during development.
+- Format: `- [Platform/Tool]: what doesn't work → workaround used`
+- Example: `- Cloudflare Workers: no native fs access → use KV for file storage`
+
+**## Lessons** — Anti-patterns and "tried X, broke because Y" discoveries.
+- Format: `- [What failed] → [Root cause] → [Fix applied]`
+- Example: `- JWT refresh on mobile broke → tokens expired before retry → added sliding expiry`
