@@ -747,6 +747,39 @@ class AgentLogParser:
         # Track which log files we've already warned about
         self._warned_paths: set[str] = set()
 
+        # v0.9 Track 3b — most-recent user/assistant message timestamp
+        # (epoch seconds). Surfaced via
+        # last_user_or_assistant_activity_epoch() so the AlertEngine can
+        # consult it before firing the stuck_process heuristic
+        # (PR #28 follow-up — false-positive on active interactive
+        # sessions with high CPU + low network). None until the first
+        # user/assistant record is parsed in this process. Updated
+        # under a small lock so a metric-collection thread can read it
+        # while the parser thread is mid-update without tearing.
+        self._last_message_ts: Optional[float] = None
+        self._last_message_lock = threading.Lock()
+
+    def last_user_or_assistant_activity_epoch(self) -> Optional[float]:
+        """Most recent user/assistant message timestamp (epoch seconds), or None.
+
+        Updated whenever a JSONL record with ``type`` in
+        ``{"user", "assistant"}`` is processed. Housekeeping records
+        (queue-operation / last-prompt / summary / permission-mode /
+        file-history-snapshot) and tool_result records do NOT advance
+        this value — only "real" user/assistant turns count as activity.
+
+        Thread-safe: the parser thread writes under
+        ``_last_message_lock``; readers (e.g. the AlertEngine via the
+        callback wired in core.Sentinel.__init__) take the same lock
+        for the read.
+
+        Used by AlertEngine.evaluate to skip the stuck_process alert
+        when there has been recent agent activity (see engine.py /
+        v0.9 Track 3b — PR #28 follow-up).
+        """
+        with self._last_message_lock:
+            return self._last_message_ts
+
     def start(self):
         """Start the log parser in a background thread."""
         if self._running:
@@ -876,6 +909,15 @@ class AgentLogParser:
         # don't carry cwd/gitBranch/version/model). Defensive — never
         # raise on missing keys.
         self._update_session_meta(entry, entry_type)
+
+        # v0.9 Track 3b — track most-recent user/assistant activity
+        # so the AlertEngine can skip false-positive stuck_process
+        # alerts on active interactive sessions. Housekeeping types
+        # and tool_result records do NOT count as activity here (a
+        # tool_result is a system-emitted echo of a tool run, not a
+        # fresh user turn or model thought).
+        if entry_type in ("user", "assistant"):
+            self._note_activity(entry)
 
         # Check tool_result for MCP injection
         if entry_type == "tool_result":
@@ -1286,6 +1328,37 @@ class AgentLogParser:
                 model = message.get("model")
                 if isinstance(model, str) and model:
                     meta.model = model
+
+    def _note_activity(self, entry: dict) -> None:
+        """v0.9 Track 3b — advance ``_last_message_ts`` from a user/assistant record.
+
+        Prefers the record's own ISO ``timestamp`` field (so replayed
+        history lines don't pretend to be "now"); falls back to
+        ``time.time()`` when parsing fails. Either way the value is
+        monotonically advancing in practice — Claude Code writes
+        records in chronological order, and ``time.time()`` only ever
+        moves forward at the second granularity used here.
+        """
+        ts_raw = entry.get("timestamp")
+        epoch: Optional[float] = None
+        if isinstance(ts_raw, str) and ts_raw:
+            try:
+                # Claude Code uses RFC3339 with trailing "Z"; fromisoformat
+                # in Py3.11+ handles "Z" but Py3.9/3.10 do not. Normalize.
+                normalized = ts_raw.replace("Z", "+00:00")
+                epoch = datetime.fromisoformat(normalized).timestamp()
+            except (ValueError, TypeError):
+                epoch = None
+        if epoch is None:
+            epoch = time.time()
+
+        with self._last_message_lock:
+            # Defensive: never let a stale/replayed record move the
+            # cursor backwards. The stuck_process check cares about
+            # "most recent activity", so monotonic-on-write is the
+            # contract that matches the consumer's mental model.
+            if self._last_message_ts is None or epoch > self._last_message_ts:
+                self._last_message_ts = epoch
 
     def _current_session_meta(self) -> Optional[SessionMeta]:
         """Return the SessionMeta for the file currently being tailed

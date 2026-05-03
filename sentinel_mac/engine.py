@@ -1,11 +1,12 @@
 """Sentinel — Alert Engine."""
 
 import re
+import time
 import logging
 from datetime import datetime
 from collections import deque
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from sentinel_mac.models import SystemMetrics, Alert, SecurityEvent
 
@@ -175,6 +176,43 @@ class AlertEngine:
             level = "standard"
         self._context_level: str = level
 
+        # v0.9 Track 3b — optional callback returning the most-recent
+        # user/assistant message timestamp (epoch seconds) from the
+        # AgentLogParser. When present, the stuck_process branch in
+        # evaluate() consults it to skip false-positive alerts during
+        # active interactive sessions (PR #28 follow-up). Wired by
+        # core.Sentinel.__init__ after collector construction; stays
+        # None for tests / standalone construction so the engine
+        # behavior is unchanged from v0.8.
+        self._agent_activity_callback: Optional[
+            Callable[[], Optional[float]]
+        ] = None
+
+    # v0.9 Track 3b — late-bound dependency injection. Setter (vs
+    # __init__ kwarg) is deliberate: AlertEngine is constructed before
+    # the AgentLogParser exists in core.Sentinel.__init__, and tests
+    # that build a bare AlertEngine should not have to pass a stub.
+    def set_agent_activity_callback(
+        self, callback: Optional[Callable[[], Optional[float]]]
+    ) -> None:
+        """Wire a callable returning the most-recent agent activity epoch.
+
+        Pass ``None`` to detach (e.g. when the agent log parser is
+        disabled by config). The callback is consulted on every
+        ``evaluate()`` call where the stuck_process precondition
+        (5 samples, avg_cpu > 50, avg_net < 0.1) is otherwise met,
+        so the implementation should be cheap and lock-thrifty —
+        ``AgentLogParser.last_user_or_assistant_activity_epoch``
+        satisfies that contract.
+        """
+        self._agent_activity_callback = callback
+
+    # v0.9 Track 3b — stuck_process false-positive grace window.
+    # Keep as a class-level constant (not a config knob) until/unless
+    # users ask for tuning. PR #28 commit narrative explicitly favors
+    # "tighten the heuristic" over "add another threshold".
+    _STUCK_PROCESS_ACTIVITY_GRACE_SEC: float = 300.0  # 5 minutes
+
     def evaluate(self, m: SystemMetrics) -> list[Alert]:
         self._history.append(m)
         alerts = []
@@ -288,13 +326,46 @@ class AlertEngine:
                 avg_cpu = sum(h.ai_cpu_total for h in recent) / len(recent)
                 avg_net = sum(h.net_sent_mb + h.net_recv_mb for h in recent) / len(recent)
                 if avg_cpu > 50 and avg_net < 0.1:
-                    alerts.append(Alert(
-                        level="warning", category="stuck_process",
-                        title="\U0001f504 Suspected Stuck Process",
-                        message=f"AI process using {avg_cpu:.0f}% CPU\n"
-                               f"but near-zero network I/O \u2014 possible infinite loop",
-                        emoji="\U0001f7e0", priority=4
-                    ))
+                    # v0.9 Track 3b (PR #28 follow-up) \u2014 high CPU +
+                    # near-zero network is necessary but not sufficient
+                    # evidence of a stuck process. Local model thinking,
+                    # batch processing, and any heavily-CPU-bound but
+                    # legitimately-running interactive session match
+                    # the same shape. Before firing, consult the agent
+                    # log parser's most-recent user/assistant message
+                    # timestamp; if it is within the grace window
+                    # (default 5 min) we suppress the alert as a
+                    # false-positive on an active session.
+                    #
+                    # Suppression is intentionally conservative: only
+                    # callbacks that return a real epoch and are within
+                    # the window suppress. A None callback (no parser
+                    # wired) or a None return (no messages observed
+                    # yet this process) falls through to the legacy
+                    # CPU+net heuristic so prior behavior is preserved.
+                    suppressed_by_activity = False
+                    if self._agent_activity_callback is not None:
+                        try:
+                            last_activity = self._agent_activity_callback()
+                        except Exception:  # pragma: no cover - defensive
+                            # The callback is supposed to be
+                            # exception-free, but the alert path must
+                            # never crash the daemon \u2014 fall through to
+                            # legacy heuristic on any failure.
+                            last_activity = None
+                        if last_activity is not None:
+                            age_sec = time.time() - last_activity
+                            if 0 <= age_sec < self._STUCK_PROCESS_ACTIVITY_GRACE_SEC:
+                                suppressed_by_activity = True
+
+                    if not suppressed_by_activity:
+                        alerts.append(Alert(
+                            level="warning", category="stuck_process",
+                            title="\U0001f504 Suspected Stuck Process",
+                            message=f"AI process using {avg_cpu:.0f}% CPU\n"
+                                   f"but near-zero network I/O \u2014 possible infinite loop",
+                            emoji="\U0001f7e0", priority=4
+                        ))
 
         else:
             if self._session_start:

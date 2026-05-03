@@ -365,6 +365,20 @@ class Sentinel:
                     project_ctx=self.project_ctx,
                 )
 
+        # v0.9 Track 3b (PR #28 follow-up) — wire the agent log
+        # parser's last-activity getter into the AlertEngine so the
+        # stuck_process heuristic can suppress false-positives during
+        # active interactive sessions. Done after the collectors block
+        # so the parser instance (or None) is final. SIGHUP reload
+        # does NOT swap the AgentLogParser instance (ADR 0005 D2
+        # explicitly preserves agent log parser state across reload —
+        # tail offsets, and by extension the same instance), so this
+        # wire-up does not need to be repeated in _do_reload.
+        if self._agent_log_parser is not None:
+            self.engine.set_agent_activity_callback(
+                self._agent_log_parser.last_user_or_assistant_activity_epoch
+            )
+
         self.interval = self.config.get("check_interval_seconds", 30)
         self.status_interval = self.config.get("status_interval_minutes", 60)
         self._last_status = datetime.min
@@ -1369,6 +1383,117 @@ def _hook_check():
     sys.exit(0)
 
 
+def _print_version_snapshot() -> None:
+    """v0.9 Track 3b — print version + fast environment snapshot.
+
+    Output shape::
+
+        sentinel-mac X.Y.Z
+
+          config:    /Users/x/.config/sentinel/config.yaml
+          data dir:  /Users/x/.local/share/sentinel/
+          daemon:    running (PID 12345)
+          CC hook:   installed
+
+    First line matches the legacy ``--version`` output verbatim so
+    any user / script that greps the version out keeps working.
+    Each subsequent line is best-effort: a missing file / permission
+    error degrades to a short status (``not configured`` /
+    ``not running`` / ``not installed`` / ``unknown``) instead of
+    raising — ``--version`` is meant to be a fast sanity check that
+    never crashes. For a full check with remediation hints, use
+    ``sentinel doctor``.
+    """
+    from sentinel_mac import __version__ as _ver
+
+    print(f"sentinel-mac {_ver}")
+    print()
+    print(f"  config:    {_version_config_line()}")
+    print(f"  data dir:  {_version_data_dir_line()}")
+    print(f"  daemon:    {_version_daemon_line()}")
+    print(f"  CC hook:   {_version_hook_line()}")
+
+
+def _version_config_line() -> str:
+    """Best-effort config path line for ``--version``.
+
+    Mirrors :func:`resolve_config_path`'s priority order but stays
+    quiet on any unexpected failure so the snapshot never crashes.
+    """
+    try:
+        resolved = resolve_config_path(None)
+    except Exception:  # pragma: no cover — defensive
+        return "unknown"
+    if resolved is None:
+        return "not configured (run: sentinel --init-config)"
+    return str(resolved)
+
+
+def _version_data_dir_line() -> str:
+    """Best-effort data dir line for ``--version``."""
+    try:
+        return str(resolve_data_dir())
+    except Exception:  # pragma: no cover — defensive
+        return "unknown"
+
+
+def _version_daemon_line() -> str:
+    """Best-effort daemon status line for ``--version``.
+
+    Probes the lock file via a non-blocking flock acquire — if we
+    grab it, no daemon is holding it; we release immediately. PID
+    is read from the lock file contents (best-effort) when the lock
+    is held.
+    """
+    try:
+        lock_path = daemon_lock_path()
+    except Exception:  # pragma: no cover — defensive
+        return "unknown"
+    if not lock_path.exists():
+        return "not running"
+    try:
+        # Try to grab the lock non-blocking. If we get it, no daemon
+        # is running; release and report. Open in r+ so we don't
+        # truncate the PID written by the actual daemon.
+        with open(lock_path, "r+") as fp:
+            try:
+                fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fp, fcntl.LOCK_UN)
+                return "not running"
+            except OSError:
+                # Held by another process — this is the daemon.
+                pid_text = ""
+                try:
+                    fp.seek(0)
+                    pid_text = fp.read().strip()
+                except Exception:
+                    pass
+                if pid_text and pid_text.isdigit():
+                    return f"running (PID {pid_text})"
+                return "running"
+    except OSError:
+        return "unknown"
+
+
+def _version_hook_line() -> str:
+    """Best-effort Claude Code hook installation line for ``--version``."""
+    if not CLAUDE_SETTINGS_PATH.exists():
+        return "not installed (Claude Code settings not found)"
+    try:
+        settings = json.loads(CLAUDE_SETTINGS_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        # Don't surface the underlying error — the snapshot is a
+        # fast check, not a debugger. `sentinel doctor` is the
+        # diagnostic surface that explains *why*.
+        return "unknown (cannot read ~/.claude/settings.json)"
+    hooks = settings.get("hooks", {}).get("PreToolUse", []) if isinstance(settings, dict) else []
+    if not isinstance(hooks, list):
+        return "not installed"
+    if any(_hook_has_sentinel(h) for h in hooks if isinstance(h, dict)):
+        return "installed"
+    return "not installed (run: sentinel hooks install)"
+
+
 def _service_control(command: str):
     """Control the Sentinel launchd service."""
     if command == "status":
@@ -1444,7 +1569,11 @@ def _service_control(command: str):
 
 def main():
     import argparse
-    from sentinel_mac import __version__
+
+    # v0.9 Track 3b — `__version__` is no longer needed at this scope.
+    # The bolstered ``--version`` handler imports it inside
+    # ``_print_version_snapshot``; the no-config quickstart banner
+    # below already does its own local import.
 
     # Handle subcommands that take their own args before argparse runs
     if len(sys.argv) >= 2 and sys.argv[1] == "hook-check":
@@ -1497,7 +1626,19 @@ def main():
     parser.add_argument("--config", "-c", default=None, help="Config file path")
     parser.add_argument("--once", action="store_true", help="Run once and print metrics")
     parser.add_argument("--test-notify", action="store_true", help="Send test notification")
-    parser.add_argument("--version", "-v", action="version", version=f"sentinel-mac {__version__}")
+    # v0.9 Track 3b — bolstered --version output. Switched from
+    # argparse's built-in ``action="version"`` (single line, prints +
+    # exits inside argparse) to a plain store_true flag so we can
+    # render a multi-line snapshot (config path / data dir / daemon
+    # status / hook installed). The first line still matches the
+    # legacy ``sentinel-mac X.Y.Z`` shape so any user / script that
+    # greps the version out keeps working.
+    parser.add_argument("--version", "-v", action="store_true",
+                        help="Print version and a fast environment "
+                             "snapshot (config path, data dir, daemon "
+                             "status, hook installed). For full "
+                             "diagnosis with remediation, use "
+                             "`sentinel doctor`.")
     parser.add_argument("--report", nargs="?", const=1, type=int, metavar="DAYS",
                         help="Show event summary (default: today, or specify number of days). "
                              "Combine with --since/--severity/--source/--type to filter; "
@@ -1521,6 +1662,14 @@ def main():
     parser.add_argument("--init-config", action="store_true",
                         help="Generate config.yaml in ~/.config/sentinel/")
     args = parser.parse_args()
+
+    # v0.9 Track 3b — bolstered --version handler. Runs before any
+    # other dispatch so it stays a fast, side-effect-free sanity
+    # check. Each line is best-effort; missing files / permission
+    # errors degrade to a short "not …" status without raising.
+    if args.version:
+        _print_version_snapshot()
+        return
 
     if args.command == "hook-check":
         _hook_check()

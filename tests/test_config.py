@@ -1,13 +1,20 @@
 """Tests for configuration loading and validation."""
+import json
 import pytest
 import tempfile
 from pathlib import Path
 
+from sentinel_mac import core as core_mod
 from sentinel_mac.core import (
     DEFAULT_CONFIG,
     load_config,
     _validate_config,
     resolve_config_path,
+    _print_version_snapshot,
+    _version_config_line,
+    _version_data_dir_line,
+    _version_daemon_line,
+    _version_hook_line,
 )
 
 
@@ -225,3 +232,174 @@ class TestResolveConfigPath:
         monkeypatch.setattr(Path, "home", lambda: tmp_path / "fakehome")
         result = resolve_config_path()
         assert result is None
+
+
+class TestVersionOutput:
+    """v0.9 Track 3b — `sentinel --version` snapshot.
+
+    The output:
+        sentinel-mac X.Y.Z
+        <blank>
+          config:    ...
+          data dir:  ...
+          daemon:    ...
+          CC hook:   ...
+
+    First line MUST keep the legacy ``sentinel-mac X.Y.Z`` shape so
+    scripts that grep the version out keep working. Each subsequent
+    line is best-effort — never raises.
+    """
+
+    def _isolate_environment(self, monkeypatch, tmp_path):
+        """Point HOME and CWD into tmp_path so the snapshot reads
+        a known-empty environment instead of whatever the developer
+        machine actually has installed.
+
+        Without this, --version probes ~/.config/sentinel/config.yaml,
+        ~/.local/share/sentinel/sentinel.lock, and
+        ~/.claude/settings.json on the real filesystem — making the
+        test results depend on the contributor's machine state.
+        """
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.chdir(tmp_path)
+        # CLAUDE_SETTINGS_PATH is computed at import time from
+        # Path.home(); override the module-level constant too so the
+        # hook check actually inspects the fake home.
+        monkeypatch.setattr(
+            core_mod, "CLAUDE_SETTINGS_PATH",
+            fake_home / ".claude" / "settings.json",
+        )
+        return fake_home
+
+    def test_version_snapshot_first_line_legacy_shape(
+        self, capsys, monkeypatch, tmp_path,
+    ):
+        """First line must be ``sentinel-mac X.Y.Z`` for grep-out scripts."""
+        from sentinel_mac import __version__
+        self._isolate_environment(monkeypatch, tmp_path)
+        _print_version_snapshot()
+        out = capsys.readouterr().out
+        first_line = out.splitlines()[0]
+        assert first_line == f"sentinel-mac {__version__}"
+
+    def test_version_snapshot_includes_all_four_lines(
+        self, capsys, monkeypatch, tmp_path,
+    ):
+        """Each of the four enrichment lines must be present."""
+        self._isolate_environment(monkeypatch, tmp_path)
+        _print_version_snapshot()
+        out = capsys.readouterr().out
+        assert "config:" in out
+        assert "data dir:" in out
+        assert "daemon:" in out
+        assert "CC hook:" in out
+
+    def test_config_line_when_no_config_found(self, monkeypatch, tmp_path):
+        """No config file anywhere → 'not configured (...)' message."""
+        self._isolate_environment(monkeypatch, tmp_path)
+        line = _version_config_line()
+        assert "not configured" in line
+        assert "sentinel --init-config" in line
+
+    def test_config_line_when_xdg_config_exists(self, monkeypatch, tmp_path):
+        """XDG-located config → its path is reported."""
+        fake_home = self._isolate_environment(monkeypatch, tmp_path)
+        cfg_dir = fake_home / ".config" / "sentinel"
+        cfg_dir.mkdir(parents=True)
+        cfg_file = cfg_dir / "config.yaml"
+        cfg_file.write_text("ntfy_topic: x\n")
+        line = _version_config_line()
+        assert line == str(cfg_file)
+
+    def test_data_dir_line_returns_a_path(self, monkeypatch, tmp_path):
+        """Data dir is always a real path (resolve_data_dir mkdirs it)."""
+        self._isolate_environment(monkeypatch, tmp_path)
+        line = _version_data_dir_line()
+        # Either the in-tree ./logs (cwd-relative) or the XDG dir.
+        assert line  # non-empty
+        assert "/" in line
+
+    def test_daemon_line_when_no_lock_file(self, monkeypatch, tmp_path):
+        """No lock file → 'not running'."""
+        self._isolate_environment(monkeypatch, tmp_path)
+        line = _version_daemon_line()
+        assert line == "not running"
+
+    def test_daemon_line_when_lock_unheld(self, monkeypatch, tmp_path):
+        """Lock file exists but no daemon holds it → 'not running'.
+
+        The version snapshot probes the lock with a non-blocking
+        flock; if it acquires the lock, the daemon is not running.
+        """
+        from sentinel_mac.core import daemon_lock_path
+        self._isolate_environment(monkeypatch, tmp_path)
+        # Touch the lock file so it exists but is unheld.
+        lock = daemon_lock_path()
+        lock.write_text("")
+        line = _version_daemon_line()
+        assert line == "not running"
+
+    def test_hook_line_when_settings_missing(self, monkeypatch, tmp_path):
+        """No ~/.claude/settings.json → 'not installed (...)'."""
+        self._isolate_environment(monkeypatch, tmp_path)
+        line = _version_hook_line()
+        assert "not installed" in line
+
+    def test_hook_line_when_hook_installed(self, monkeypatch, tmp_path):
+        """Sentinel hook present in PreToolUse → 'installed'."""
+        fake_home = self._isolate_environment(monkeypatch, tmp_path)
+        settings_path = fake_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(json.dumps({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {"type": "command",
+                             "command": "/usr/local/bin/sentinel hook-check"},
+                        ],
+                    },
+                ],
+            },
+        }))
+        line = _version_hook_line()
+        assert line == "installed"
+
+    def test_hook_line_when_hook_missing_from_settings(
+        self, monkeypatch, tmp_path,
+    ):
+        """Settings exist but no Sentinel hook → 'not installed (...)'."""
+        fake_home = self._isolate_environment(monkeypatch, tmp_path)
+        settings_path = fake_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text(json.dumps({"hooks": {"PreToolUse": []}}))
+        line = _version_hook_line()
+        assert "not installed" in line
+        assert "sentinel hooks install" in line
+
+    def test_hook_line_when_settings_corrupt(self, monkeypatch, tmp_path):
+        """Malformed JSON in settings → 'unknown (...)' (no crash)."""
+        fake_home = self._isolate_environment(monkeypatch, tmp_path)
+        settings_path = fake_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text("{not json")
+        line = _version_hook_line()
+        assert "unknown" in line
+
+    def test_version_snapshot_never_raises_on_corrupt_settings(
+        self, capsys, monkeypatch, tmp_path,
+    ):
+        """End-to-end: corrupt hook settings must degrade gracefully."""
+        fake_home = self._isolate_environment(monkeypatch, tmp_path)
+        settings_path = fake_home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        settings_path.write_text("{invalid")
+        # Must not raise.
+        _print_version_snapshot()
+        out = capsys.readouterr().out
+        assert "sentinel-mac" in out
+        # Hook line shows "unknown (...)"
+        assert "unknown" in out

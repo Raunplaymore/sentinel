@@ -1,4 +1,6 @@
 """Tests for AlertEngine logic."""
+import time
+
 import pytest
 from datetime import datetime, timedelta
 
@@ -225,6 +227,145 @@ class TestSessionAlerts:
         m2 = make_metrics(timestamp=now + timedelta(minutes=10), ai_processes=[])
         alerts = engine.evaluate(m2)
         assert any(a.category == "session_end" for a in alerts)
+
+
+class TestStuckProcessActivityCheck:
+    """v0.9 Track 3b — stuck_process must consult agent activity callback.
+
+    PR #28 follow-up: an interactive session with high CPU + low net
+    (local model thinking, batch processing, user-prompted long
+    operation) used to false-positive as "stuck". The engine now
+    consults a callback returning the most-recent agent activity
+    epoch (wired by core.Sentinel from
+    AgentLogParser.last_user_or_assistant_activity_epoch). When recent
+    activity is within the grace window (default 5 min), the alert is
+    suppressed.
+    """
+
+    @staticmethod
+    def _drive_to_stuck_state(engine, base_ts):
+        """Push 4 high-CPU, low-net priming samples through evaluate().
+
+        ``evaluate()`` appends to ``_history`` BEFORE checking, so 4
+        priming calls + the caller's own 5th ``evaluate(next_m)`` =
+        the first call where ``len(_history) >= 5`` and the
+        stuck_process branch becomes eligible to fire. Cooldowns then
+        suppress repeats, so we want the test's own call to be the
+        first-eligible tick (the only one the test will inspect).
+        Returns the next-tick metric to feed to ``evaluate()``.
+        """
+        ai_procs = [{"pid": 1, "name": "ollama", "cpu": 95.0, "mem_mb": 1000}]
+        for i in range(4):
+            engine.evaluate(make_metrics(
+                timestamp=base_ts + timedelta(seconds=i * 30),
+                ai_processes=ai_procs,
+                ai_cpu_total=95.0,
+                net_sent_mb=0.01,
+                net_recv_mb=0.01,
+            ))
+        return make_metrics(
+            timestamp=base_ts + timedelta(seconds=4 * 30),
+            ai_processes=ai_procs,
+            ai_cpu_total=95.0,
+            net_sent_mb=0.01,
+            net_recv_mb=0.01,
+        )
+
+    def test_callback_none_preserves_legacy_heuristic(self):
+        """No callback wired (e.g. agent_logs disabled) → fires as before."""
+        engine = AlertEngine(DEFAULT_CONFIG)
+        # Default engine has no callback set → legacy heuristic.
+        assert engine._agent_activity_callback is None
+        next_m = self._drive_to_stuck_state(engine, datetime.now())
+        alerts = engine.evaluate(next_m)
+        assert any(a.category == "stuck_process" for a in alerts), (
+            "Without a callback, the legacy CPU+net heuristic must "
+            "still fire so the v0.8 behavior is preserved for users "
+            "who run with security.agent_logs.enabled=false."
+        )
+
+    def test_callback_returning_none_preserves_legacy_heuristic(self):
+        """Callback wired but returning None (no messages yet) → fires."""
+        engine = AlertEngine(DEFAULT_CONFIG)
+        engine.set_agent_activity_callback(lambda: None)
+        next_m = self._drive_to_stuck_state(engine, datetime.now())
+        alerts = engine.evaluate(next_m)
+        assert any(a.category == "stuck_process" for a in alerts), (
+            "A None-returning callback (parser running but no "
+            "user/assistant message observed yet) must NOT suppress "
+            "the alert — fall through to the legacy heuristic."
+        )
+
+    def test_recent_activity_suppresses_alert(self):
+        """Activity within 5-min grace window → alert suppressed."""
+        engine = AlertEngine(DEFAULT_CONFIG)
+        # 60 seconds ago → well within the 5-min grace window.
+        engine.set_agent_activity_callback(
+            lambda: time.time() - 60.0
+        )
+        next_m = self._drive_to_stuck_state(engine, datetime.now())
+        alerts = engine.evaluate(next_m)
+        assert not any(a.category == "stuck_process" for a in alerts), (
+            "Activity 60s ago is well inside the 5-min grace window; "
+            "the stuck_process alert MUST be suppressed (PR #28 "
+            "follow-up — false-positive on active interactive sessions)."
+        )
+
+    def test_stale_activity_does_not_suppress(self):
+        """Activity older than 5-min grace window → alert fires."""
+        engine = AlertEngine(DEFAULT_CONFIG)
+        # 6 minutes ago → just past the 5-min grace window.
+        engine.set_agent_activity_callback(
+            lambda: time.time() - (6 * 60.0)
+        )
+        next_m = self._drive_to_stuck_state(engine, datetime.now())
+        alerts = engine.evaluate(next_m)
+        assert any(a.category == "stuck_process" for a in alerts), (
+            "Activity 6 minutes ago is past the 5-min grace window; "
+            "if CPU is still high and net still low, this is the "
+            "case the heuristic SHOULD catch."
+        )
+
+    def test_callback_exception_falls_through_to_legacy(self):
+        """A raising callback must not crash the daemon; legacy fires."""
+        def boom():
+            raise RuntimeError("simulated upstream parser failure")
+
+        engine = AlertEngine(DEFAULT_CONFIG)
+        engine.set_agent_activity_callback(boom)
+        next_m = self._drive_to_stuck_state(engine, datetime.now())
+        # Must not raise; must not silently suppress either — falling
+        # through to legacy means the alert still fires.
+        alerts = engine.evaluate(next_m)
+        assert any(a.category == "stuck_process" for a in alerts)
+
+    def test_real_user_report_2026_05_03_active_session_no_false_positive(self):
+        """Verbatim regression for the 2026-05-03 user report.
+
+        User scenario: high CPU (local model thinking) + low net for
+        ~2.5 minutes during an actively-conversed interactive session.
+        With the v0.8 heuristic this fired a misleading "Suspected
+        Stuck Process / possible infinite loop" warning. With the
+        Track 3b fix wired through AgentLogParser, the same scenario
+        must NOT fire because the user/assistant message exchange
+        happened seconds ago.
+        """
+        engine = AlertEngine(DEFAULT_CONFIG)
+        # The agent log parser has just observed a user/assistant
+        # turn — say 30 seconds ago, mid-conversation.
+        engine.set_agent_activity_callback(
+            lambda: time.time() - 30.0
+        )
+        next_m = self._drive_to_stuck_state(engine, datetime.now())
+        alerts = engine.evaluate(next_m)
+        stuck = [a for a in alerts if a.category == "stuck_process"]
+        assert stuck == [], (
+            "v0.8 false-positive (user report 2026-05-03): an active "
+            "interactive session with the model thinking must not "
+            "produce a stuck_process alert. This regression test locks "
+            "in the Track 3b fix — if it fails, PR #28's heuristic "
+            "refinement has been undone."
+        )
 
 
 class TestNightWatch:
