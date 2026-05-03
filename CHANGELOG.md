@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (v0.9 Track 3a)
+- ADR 0008 implementation: `notifications.context_level` config key
+  with three values (`minimal` / `standard` / `full`). Default
+  `standard` matches v0.8.0 behavior; `full` adds a "Repo:
+  owner/repo" line under `Project:` in the alert `[ctx]` block;
+  `minimal` strips the entire `[ctx]` block from alerts. Unknown
+  values fall back to `standard` with a `WARNING` (fail-soft per
+  ADR 0005 §D3 — also normalized at SIGHUP reload time, never
+  aborts the reload).
+- ADR 0009 implementation: `sentinel doctor --cleanup-backups
+  --keep N [--dry-run] [--yes]` for user-initiated config-backup
+  cleanup. Mandatory `--keep` (no safe default), interactive
+  `[y/N]` prompt unless `--yes`, non-TTY stdin auto-cancels with
+  stderr `WARNING` (cron-safe — never hangs), JSON envelope
+  `kind=backup_cleanup` matching ADR 0004 §D2. Exit codes 0 / 1 / 2
+  per ADR 0009 §D7. Mutually exclusive with the standard 9-check
+  doctor mode.
+- ADR 0007 §D4 amendment implementation: `ProjectContext` now
+  `os.stat()`s `<root>/.git/HEAD` on every `lookup()` and drops
+  cached entries when `st_mtime_ns` advances — `git checkout`
+  shows up immediately instead of waiting for the 5-min TTL.
+  Non-git projects skip the check; `os.stat` failures fall back
+  silently to TTL behavior with a single DEBUG log line per cwd
+  per session. Public API unchanged (additive amendment).
+
 ### Added (v0.9 freeze)
 - **ADR 0008 — Notification Context Level**. Freezes the new
   `notifications.context_level` setting (`minimal` / `standard` /

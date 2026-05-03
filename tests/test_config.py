@@ -122,6 +122,97 @@ class TestValidateConfig:
         assert result["thresholds"]["battery_warning"] == 20
 
 
+class TestContextLevelValidation:
+    """ADR 0008 D5 — fail-soft validation of notifications.context_level.
+
+    Unknown values fall back to "standard" + WARNING; never raise.
+    Missing key is silent (engine treats absence as "standard" by
+    default in __init__).
+    """
+
+    def _base_config(self):
+        return {
+            "check_interval_seconds": 30,
+            "status_interval_minutes": 60,
+            "cooldown_minutes": 10,
+            "thresholds": DEFAULT_CONFIG["thresholds"].copy(),
+        }
+
+    def test_valid_minimal_unchanged(self):
+        cfg = self._base_config()
+        cfg["notifications"] = {"context_level": "minimal"}
+        result = _validate_config(cfg)
+        assert result["notifications"]["context_level"] == "minimal"
+
+    def test_valid_standard_unchanged(self):
+        cfg = self._base_config()
+        cfg["notifications"] = {"context_level": "standard"}
+        result = _validate_config(cfg)
+        assert result["notifications"]["context_level"] == "standard"
+
+    def test_valid_full_unchanged(self):
+        cfg = self._base_config()
+        cfg["notifications"] = {"context_level": "full"}
+        result = _validate_config(cfg)
+        assert result["notifications"]["context_level"] == "full"
+
+    def test_unknown_value_falls_back_to_standard(self, caplog):
+        cfg = self._base_config()
+        cfg["notifications"] = {"context_level": "full_disclosure"}
+        import logging as _logging
+        with caplog.at_level(_logging.WARNING):
+            result = _validate_config(cfg)
+        # Fail-soft normalization (ADR 0008 D5).
+        assert result["notifications"]["context_level"] == "standard"
+        # WARNING was logged once.
+        warnings = [r for r in caplog.records if r.levelno == _logging.WARNING]
+        assert any(
+            "context_level" in r.getMessage() for r in warnings
+        )
+
+    def test_missing_key_silent_default(self, caplog):
+        cfg = self._base_config()
+        cfg["notifications"] = {"ntfy_topic": "x"}  # no context_level
+        import logging as _logging
+        with caplog.at_level(_logging.WARNING):
+            result = _validate_config(cfg)
+        # Key still missing; the engine __init__ defaults to "standard".
+        assert "context_level" not in result["notifications"]
+        # No WARNING for the absent key.
+        assert not any(
+            "context_level" in r.getMessage()
+            for r in caplog.records
+            if r.levelno == _logging.WARNING
+        )
+
+    def test_missing_notifications_section_silent(self):
+        cfg = self._base_config()
+        result = _validate_config(cfg)
+        # No notifications section — validation simply skips the check.
+        assert "notifications" not in result or "context_level" not in (
+            result.get("notifications") or {}
+        )
+
+    def test_reload_validation_does_not_raise_on_invalid_level(self):
+        """ADR 0005 §D3 atomic-or-nothing: a bad context_level must NOT
+        abort the reload. _validate_reload_config normalizes the value
+        in-place rather than raising."""
+        # Late import to avoid a top-level dependency on Sentinel class.
+        from sentinel_mac.core import Sentinel as _Sentinel  # noqa: F401
+        from unittest.mock import MagicMock
+        from sentinel_mac import core as _core
+
+        # Borrow the validator off an instance without running __init__
+        # (which has heavy side effects). The method only touches its
+        # `new_config` argument.
+        instance = MagicMock(spec=_Sentinel)
+        bad = {"notifications": {"context_level": "totally_not_valid"}}
+        # Bind the unbound method explicitly.
+        _core.Sentinel._validate_reload_config(instance, bad)
+        # Normalized in place; no exception raised.
+        assert bad["notifications"]["context_level"] == "standard"
+
+
 class TestResolveConfigPath:
     """Tests for resolve_config_path function."""
 

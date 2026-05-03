@@ -601,6 +601,272 @@ class TestCtxBlockFormatting:
         assert "remote" not in block.lower()
 
 
+# ─── ADR 0008 — notification context_level ────────────────────────
+
+
+class TestContextLevelMinimal:
+    """ADR 0008 D1 — `minimal` drops the entire [ctx] block."""
+
+    def test_minimal_returns_empty_with_full_detail(self):
+        from sentinel_mac.engine import _format_ctx_block
+        block = _format_ctx_block({
+            "session": {
+                "id": "abc-uuid-12345678",
+                "model": "claude-opus-4-7",
+                "version": "2.1.123",
+                "cwd": "/Users/x/proj",
+            },
+            "project_meta": {
+                "name": "myproj", "root": "/Users/x/proj",
+                "git": {"branch": "main", "head": "abc12345"},
+            },
+            "command": "pip install requets",
+        }, level="minimal")
+        # ADR 0008 D1 — minimal MUST short-circuit to empty regardless
+        # of what the detail dict contains.
+        assert block == ""
+
+    def test_minimal_returns_empty_with_empty_detail(self):
+        from sentinel_mac.engine import _format_ctx_block
+        assert _format_ctx_block({}, level="minimal") == ""
+        assert _format_ctx_block({"session": None}, level="minimal") == ""
+
+
+class TestContextLevelStandard:
+    """ADR 0008 D1 — `standard` matches v0.8.0 behavior verbatim
+    (no git.remote leak, all 4 lines on a fully-populated detail)."""
+
+    def test_standard_omits_repo_line(self):
+        from sentinel_mac.engine import _format_ctx_block
+        block = _format_ctx_block({
+            "project_meta": {
+                "name": "myproj",
+                "git": {
+                    "branch": "main", "head": "abc12345",
+                    "remote": "foo/bar",
+                },
+            },
+        }, level="standard")
+        # ADR 0008 D2 — standard NEVER surfaces git.remote (the v0.8
+        # default; ADR 0007 §D7 narrowed scope).
+        assert "foo/bar" not in block
+        assert "Repo:" not in block
+        # Project line still rendered.
+        assert "Project: myproj (main @ abc12345)" in block
+
+    def test_default_level_is_standard(self):
+        """The default kwarg value is `standard` so existing call sites
+        that don't pass level= keep v0.8 behavior verbatim."""
+        from sentinel_mac.engine import _format_ctx_block
+        detail = {
+            "project_meta": {
+                "name": "p",
+                "git": {"branch": "m", "head": "deadbeef", "remote": "o/r"},
+            },
+        }
+        # No level= → default standard.
+        assert _format_ctx_block(detail) == _format_ctx_block(
+            detail, level="standard"
+        )
+
+
+class TestContextLevelFull:
+    """ADR 0008 D1 — `full` adds the Repo line under Project."""
+
+    def test_full_adds_repo_line_under_project(self):
+        from sentinel_mac.engine import _format_ctx_block
+        block = _format_ctx_block({
+            "project_meta": {
+                "name": "myproj",
+                "git": {
+                    "branch": "main", "head": "abc12345",
+                    "remote": "foo/bar",
+                },
+            },
+        }, level="full")
+        lines = [ln for ln in block.splitlines() if ln.strip()]
+        # Project: line is first; Repo: line is directly after it.
+        project_idx = next(
+            i for i, ln in enumerate(lines) if "Project:" in ln
+        )
+        assert "Repo:" in lines[project_idx + 1]
+        assert "foo/bar" in lines[project_idx + 1]
+
+    def test_full_omits_repo_line_when_remote_is_none(self):
+        from sentinel_mac.engine import _format_ctx_block
+        block = _format_ctx_block({
+            "project_meta": {
+                "name": "myproj",
+                "git": {"branch": "main", "head": "abc12345", "remote": None},
+            },
+        }, level="full")
+        # remote=None → no Repo line at all (silent omit per ADR 0008 D1).
+        assert "Repo:" not in block
+        assert "Project: myproj (main @ abc12345)" in block
+
+    def test_full_omits_repo_line_when_remote_is_empty_string(self):
+        from sentinel_mac.engine import _format_ctx_block
+        block = _format_ctx_block({
+            "project_meta": {
+                "name": "myproj",
+                "git": {"branch": "main", "head": "abc12345", "remote": ""},
+            },
+        }, level="full")
+        assert "Repo:" not in block
+
+    def test_full_other_lines_match_standard(self):
+        """Full mode adds ONLY the Repo line; Session/Where/What lines
+        are bit-for-bit identical to standard."""
+        from sentinel_mac.engine import _format_ctx_block
+        detail = {
+            "session": {
+                "id": "abc-uuid-12345678",
+                "model": "claude-opus-4-7",
+                "version": "2.1.123",
+                "cwd": "/tmp/somewhere",
+            },
+            "project_meta": {
+                "name": "p", "root": "/x",
+                "git": {"branch": "main", "head": "abc12345", "remote": None},
+            },
+            "command": "pip install x",
+        }
+        std = _format_ctx_block(detail, level="standard")
+        full = _format_ctx_block(detail, level="full")
+        # No remote → full == standard exactly.
+        assert std == full
+
+    def test_full_with_remote_only_adds_one_line(self):
+        from sentinel_mac.engine import _format_ctx_block
+        detail = {
+            "project_meta": {
+                "name": "p",
+                "git": {
+                    "branch": "main", "head": "abc12345",
+                    "remote": "owner/repo",
+                },
+            },
+            "command": "x",
+        }
+        std_lines = [
+            ln for ln in _format_ctx_block(detail, level="standard").splitlines()
+            if ln.strip()
+        ]
+        full_lines = [
+            ln for ln in _format_ctx_block(detail, level="full").splitlines()
+            if ln.strip()
+        ]
+        assert len(full_lines) == len(std_lines) + 1
+
+
+class TestContextLevelUnknownFallsBack:
+    """ADR 0008 D5 defensive — unknown level values fall back to
+    standard at the renderer too (config validation is the canonical
+    filter, but the renderer must never crash on a bad level)."""
+
+    def test_unknown_level_renders_as_standard(self):
+        from sentinel_mac.engine import _format_ctx_block
+        detail = {
+            "project_meta": {
+                "name": "p",
+                "git": {"branch": "m", "head": "abc12345", "remote": "o/r"},
+            },
+        }
+        unknown = _format_ctx_block(detail, level="full_disclosure")
+        std = _format_ctx_block(detail, level="standard")
+        assert unknown == std
+        # And critically: no Repo: leak via the typo path.
+        assert "o/r" not in unknown
+
+
+class TestEngineUsesConfiguredLevel:
+    """ADR 0008 D4 — the engine reads the config once at construction
+    and threads the level into every _format_ctx_block call."""
+
+    def _make_event(self):
+        return SecurityEvent(
+            timestamp=datetime.now(),
+            source="agent_log",
+            actor_pid=0,
+            actor_name="claude_code",
+            event_type="typosquatting_suspect",
+            target="requets",
+            detail={
+                "command": "pip install requets",
+                "ecosystem": "pip",
+                "similar_to": "requests",
+                "confidence": "high",
+                "session": {
+                    "id": "abc-uuid-12345678",
+                    "model": "claude-opus-4-7",
+                    "version": "2.1.123",
+                    "cwd": "/Users/x/proj",
+                },
+                "project_meta": {
+                    "name": "myproj", "root": "/Users/x/proj",
+                    "git": {
+                        "branch": "main", "head": "abc12345",
+                        "remote": "owner/repo",
+                    },
+                },
+            },
+        )
+
+    def test_minimal_engine_strips_ctx_block(self):
+        cfg = {**DEFAULT_CONFIG, "notifications": {"context_level": "minimal"}}
+        engine = AlertEngine(cfg)
+        alerts = engine.evaluate_security_event(self._make_event())
+        assert len(alerts) == 1
+        msg = alerts[0].message
+        # Original alert text intact …
+        assert "requets" in msg
+        # … but no [ctx] block at all.
+        assert "Project:" not in msg
+        assert "Session:" not in msg
+        assert "Where:" not in msg
+        assert "What:" not in msg
+
+    def test_standard_engine_renders_v08_block(self):
+        cfg = {**DEFAULT_CONFIG, "notifications": {"context_level": "standard"}}
+        engine = AlertEngine(cfg)
+        alerts = engine.evaluate_security_event(self._make_event())
+        msg = alerts[0].message
+        assert "Project: myproj (main @ abc12345)" in msg
+        # ADR 0008 D2 — standard mode hides git.remote even on full
+        # event detail.
+        assert "owner/repo" not in msg
+        assert "Repo:" not in msg
+
+    def test_full_engine_includes_repo_line(self):
+        cfg = {**DEFAULT_CONFIG, "notifications": {"context_level": "full"}}
+        engine = AlertEngine(cfg)
+        alerts = engine.evaluate_security_event(self._make_event())
+        msg = alerts[0].message
+        assert "Repo:    owner/repo" in msg
+        # Project: line still present too.
+        assert "Project: myproj (main @ abc12345)" in msg
+
+    def test_default_config_renders_standard_no_repo(self):
+        """DEFAULT_CONFIG has no notifications key → engine defaults to
+        standard → no Repo line / no git.remote leak."""
+        engine = AlertEngine(DEFAULT_CONFIG)
+        alerts = engine.evaluate_security_event(self._make_event())
+        msg = alerts[0].message
+        assert "Project: myproj (main @ abc12345)" in msg
+        assert "Repo:" not in msg
+        assert "owner/repo" not in msg
+
+    def test_unknown_config_value_falls_back_to_standard(self):
+        """Engine __init__ defends against unknown values landing in
+        config (e.g. tests that bypass _validate_config)."""
+        cfg = {
+            **DEFAULT_CONFIG,
+            "notifications": {"context_level": "bogus-mode"},
+        }
+        engine = AlertEngine(cfg)
+        assert engine._context_level == "standard"
+
+
 class TestAlertMessageWithCtxBlock:
     """End-to-end — the engine's evaluate_security_event appends the
     [ctx] block to every Alert it produces from a SecurityEvent."""

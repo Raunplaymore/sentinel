@@ -32,6 +32,24 @@ Exit codes:
 
 The ADR 0004 §D2 frozen ``kind`` set is extended by this module to
 include ``health_check`` (additive — does not bump ``version``).
+
+ADR 0009 — Backup Cleanup mode (v0.9 Track 3a)
+==============================================
+
+``sentinel doctor --cleanup-backups --keep N [--dry-run] [--yes]`` is
+mutually exclusive with the standard 9-check pass. When the flag is
+present the 9 checks are skipped and only the cleanup runs. See ADR
+0009 for the frozen surfaces:
+
+* ``--keep`` is mandatory (no safe default — explicit user intent).
+* Selection: parse trailing integer in ``<config>.bak.<epoch>``,
+  sort descending, keep N. Filesystem mtime is NOT consulted.
+* Interactive ``[y/N]`` by default; ``--yes`` skips it; ``--dry-run``
+  reports without deleting.
+* Non-TTY stdin without ``--yes`` auto-cancels with a stderr WARNING
+  (cron-safe — never hangs).
+* JSON envelope ``kind="backup_cleanup"`` (additive, no version bump).
+* Exit codes: 0 success / 1 partial failure / 2 argument error.
 """
 
 from __future__ import annotations
@@ -644,7 +662,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sentinel doctor",
         description=(
-            "One-shot health check (ADR 0004 §D2 envelope kind=health_check)."
+            "One-shot health check (ADR 0004 §D2 envelope kind=health_check) "
+            "or, with --cleanup-backups, ADR 0009 backup cleanup."
         ),
     )
     parser.add_argument(
@@ -652,7 +671,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Emit ADR 0004 §D2 versioned envelope on stdout instead of the "
-            "human-readable text view."
+            "human-readable text view. In cleanup mode --yes is implied."
         ),
     )
     parser.add_argument(
@@ -665,6 +684,46 @@ def _build_parser() -> argparse.ArgumentParser:
             "~/.config/sentinel/config.yaml."
         ),
     )
+    # ADR 0009 cleanup-mode flags. argparse-level mutual exclusion with
+    # the 9-check mode happens at dispatch time (cleanup mode = "the
+    # --cleanup-backups flag was set"); we don't use add_mutually_exclusive_group
+    # because the 9-check mode has no flag of its own (it's the default).
+    parser.add_argument(
+        "--cleanup-backups",
+        action="store_true",
+        help=(
+            "ADR 0009 — delete old config.yaml.bak.<epoch> files keeping "
+            "the N most recent. Mutually exclusive with the standard "
+            "9-check health pass; requires --keep N."
+        ),
+    )
+    parser.add_argument(
+        "--keep",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "ADR 0009 — number of most-recent backups to retain. Mandatory "
+            "when --cleanup-backups is present (no safe default — explicit "
+            "user intent required)."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "ADR 0009 — report what would be deleted, delete nothing. "
+            "Cleanup-mode flag; ignored without --cleanup-backups."
+        ),
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help=(
+            "ADR 0009 — skip the interactive [y/N] confirmation. "
+            "Cleanup-mode flag; ignored without --cleanup-backups."
+        ),
+    )
     return parser
 
 
@@ -673,9 +732,20 @@ def dispatch(argv: Optional[Iterable] = None) -> int:
 
     Exit code is 0 when no FAIL row is present; 1 otherwise — WARN /
     INFO never fail the command.
+
+    ADR 0009 — when ``--cleanup-backups`` is present, the 9-check pass
+    is skipped and ``_cmd_cleanup_backups`` runs instead. Exit codes
+    follow ADR 0009 D7 in that branch (0 success / 1 partial failure /
+    2 argument error).
     """
     parser = _build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    # ADR 0009 D1 — cleanup mode is mutually exclusive with the standard
+    # 9-check pass. Branch early so the 9 checks never run when the user
+    # asked for cleanup.
+    if args.cleanup_backups:
+        return _cmd_cleanup_backups(args)
 
     results = _run_all_checks(args.config)
 
@@ -686,6 +756,280 @@ def dispatch(argv: Optional[Iterable] = None) -> int:
 
     counts = _summarize(results)
     return 1 if counts[STATUS_FAIL] > 0 else 0
+
+
+# ── ADR 0009 cleanup mode ─────────────────────────────────────────
+
+
+def _err(msg: str) -> None:
+    """Write a single line to stderr — used for cleanup-mode errors and
+    the non-TTY auto-cancel WARNING (ADR 0009 D4)."""
+    print(msg, file=sys.stderr)
+
+
+def _resolve_config_for_cleanup(explicit: Optional[Path]) -> Optional[Path]:
+    """Resolve the config path for cleanup-mode without requiring it to
+    parse — we only need its directory + filename to glob siblings.
+
+    Mirrors the standard ``resolve_config_path`` precedence (explicit
+    --config → ./config.yaml → ~/.config/sentinel/config.yaml) but
+    returns None when nothing is found instead of falling back to
+    defaults — cleanup against an absent config has no meaning.
+    """
+    if explicit is not None:
+        return Path(explicit)
+    resolved = resolve_config_path()
+    return Path(resolved) if resolved is not None else None
+
+
+def _list_backups(config_path: Path) -> list[Path]:
+    """ADR 0009 D3 selection rule.
+
+    Glob ``<config>.bak.*`` next to the config, parse the trailing
+    integer in each filename, sort by epoch descending, return as a
+    list of Paths. Files whose suffix after ``.bak.`` does not parse
+    to an int are silently skipped (defensive — never delete a file
+    that does not match the freeze pattern even if it lives next to it).
+
+    Filesystem mtime is intentionally NOT consulted — the epoch in the
+    filename is the canonical timestamp and survives ``cp -p`` / archive
+    round-trips.
+    """
+    parent = config_path.parent
+    if not parent.exists():
+        return []
+    pattern = f"{config_path.name}.bak.*"
+    candidates = list(parent.glob(pattern))
+    parsed: list[tuple[int, Path]] = []
+    for p in candidates:
+        # Suffix is everything after the literal ".bak." separator.
+        suffix = p.name[len(config_path.name) + len(".bak."):]
+        try:
+            epoch = int(suffix)
+        except ValueError:
+            # ADR 0009 D3 — skip non-int suffixes (defensive).
+            continue
+        parsed.append((epoch, p))
+    parsed.sort(key=lambda x: x[0], reverse=True)
+    return [p for _, p in parsed]
+
+
+def _format_epoch(epoch: int) -> str:
+    """Render a unix epoch as ``YYYY-MM-DD HH:MM:SS`` local time."""
+    try:
+        return datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M:%S")
+    except (OSError, OverflowError, ValueError):
+        return "?"
+
+
+def _print_deletion_plan(
+    delete: list[Path],
+    keep_n: int,
+    *,
+    dry_run: bool = False,
+) -> None:
+    """ADR 0009 D4 — render the deletion plan in text mode.
+
+    Shows the first 5 paths inline and elides the rest as
+    "... N more ..." so a large cleanup doesn't flood the terminal.
+    """
+    n = len(delete)
+    header = (
+        f"Would delete {n} backup file(s)" if dry_run
+        else f"Will delete {n} backup file(s)"
+    )
+    print(f"{header}, keeping the {keep_n} most recent:")
+    show = delete[:5]
+    for p in show:
+        # Suffix after .bak. is the epoch (validated by _list_backups).
+        suffix = p.name.rsplit(".bak.", 1)[-1]
+        try:
+            epoch = int(suffix)
+            ts = _format_epoch(epoch)
+        except ValueError:  # pragma: no cover — _list_backups guards this
+            ts = "?"
+        print(f"  {p.name} ({ts})")
+    if n > len(show):
+        print(f"  ... {n - len(show)} more ...")
+
+
+def _do_delete(paths: list[Path]) -> tuple[list[Path], list[tuple[Path, str]]]:
+    """Attempt to ``unlink`` each path. Returns (deleted, errors).
+
+    A failure on one path does NOT abort the rest — every path is
+    attempted independently per ADR 0009 D7 ("partial failure" is a
+    real exit-1 outcome distinct from "argument error" exit-2).
+    """
+    deleted: list[Path] = []
+    errors: list[tuple[Path, str]] = []
+    for p in paths:
+        try:
+            p.unlink()
+            deleted.append(p)
+        except OSError as exc:
+            errors.append((p, f"{type(exc).__name__}: {exc}"))
+    return deleted, errors
+
+
+def _emit_cleanup_envelope(
+    *,
+    config_path: Path,
+    found: int,
+    keep: int,
+    delete_planned: list[Path],
+    deleted: list[Path],
+    errors: list[tuple[Path, str]],
+    dry_run: bool,
+) -> None:
+    """ADR 0009 D6 — JSON envelope writer.
+
+    For dry-run mode the ``deleted`` field carries the *planned* paths
+    (what *would* be deleted) and ``dry_run: true`` flags it. For real
+    runs ``deleted`` is the list of paths that actually got unlinked
+    and ``errors`` (when present) carries any partial failures.
+    """
+    data: dict = {
+        "config_path": str(config_path),
+        "found": found,
+        "kept": min(found, keep),
+        "deleted": [str(p) for p in (delete_planned if dry_run else deleted)],
+        "dry_run": dry_run,
+    }
+    if errors:
+        data["errors"] = [
+            {"path": str(p), "error": msg} for p, msg in errors
+        ]
+    _emit_json_envelope(kind="backup_cleanup", data=data)
+
+
+def _cmd_cleanup_backups(args) -> int:
+    """ADR 0009 — ``sentinel doctor --cleanup-backups``.
+
+    Returns exit code per ADR D7:
+        0 = success / nothing to delete / cancelled / dry-run
+        1 = partial failure (some files could not be deleted)
+        2 = argument validation error
+    """
+    # ADR 0009 D2 — --keep is mandatory; no safe default. The error
+    # message is verbatim per the ADR so users get an actionable hint.
+    if args.keep is None:
+        _err(
+            "error: --cleanup-backups requires --keep N to specify how many "
+            "backups to retain. Example: sentinel doctor --cleanup-backups "
+            "--keep 3"
+        )
+        return 2
+    if args.keep < 0:
+        _err(f"error: --keep must be >= 0, got {args.keep}")
+        return 2
+
+    config_path = _resolve_config_for_cleanup(args.config)
+    if config_path is None:
+        _err(
+            "error: no config file found (looked at ./config.yaml and "
+            "~/.config/sentinel/config.yaml). Pass --config PATH to point "
+            "at the config whose backups you want to clean."
+        )
+        return 2
+
+    backups = _list_backups(config_path)
+    found = len(backups)
+    # backups[: args.keep] is the kept slice (computed implicitly via
+    # `min(found, args.keep)` in the envelope and text output below);
+    # we only need the to-delete slice for the actual unlink.
+    delete = backups[args.keep:]
+
+    # JSON mode — D6 envelope, --yes implied (no interactive prompt for
+    # tooling consumers). --dry-run still respected; errors populate
+    # data.errors and flip the exit code per D7.
+    if args.json:
+        if not delete:
+            _emit_cleanup_envelope(
+                config_path=config_path,
+                found=found,
+                keep=args.keep,
+                delete_planned=[],
+                deleted=[],
+                errors=[],
+                dry_run=args.dry_run,
+            )
+            return 0
+        if args.dry_run:
+            _emit_cleanup_envelope(
+                config_path=config_path,
+                found=found,
+                keep=args.keep,
+                delete_planned=delete,
+                deleted=[],
+                errors=[],
+                dry_run=True,
+            )
+            return 0
+        deleted, errors = _do_delete(delete)
+        _emit_cleanup_envelope(
+            config_path=config_path,
+            found=found,
+            keep=args.keep,
+            delete_planned=delete,
+            deleted=deleted,
+            errors=errors,
+            dry_run=False,
+        )
+        return 1 if errors else 0
+
+    # Text mode — D5 idempotency: nothing-to-delete is exit 0 with a
+    # friendly message (matches the ADR D5 example).
+    if not delete:
+        kept_n = min(found, args.keep)
+        print(
+            f"Nothing to delete ({found} backup file(s), keeping {kept_n})."
+        )
+        return 0
+
+    if args.dry_run:
+        _print_deletion_plan(delete, args.keep, dry_run=True)
+        return 0
+
+    # ADR 0009 D4 — interactive prompt (unless --yes). Non-TTY stdin
+    # without --yes is the cron / CI case: auto-cancel with a stderr
+    # WARNING so the command never hangs waiting for stdin.
+    if not args.yes:
+        # sys.stdin may not have isatty in unusual harnesses; guard.
+        is_tty = False
+        try:
+            is_tty = sys.stdin.isatty()
+        except (AttributeError, ValueError):
+            is_tty = False
+        if not is_tty:
+            _err(
+                "warning: --cleanup-backups invoked with non-TTY stdin and "
+                "no --yes; skipping deletion"
+            )
+            return 0
+        _print_deletion_plan(delete, args.keep)
+        try:
+            answer = input("\nProceed? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled. No files deleted.")
+            return 0
+        if answer != "y":
+            print("Cancelled. No files deleted.")
+            return 0
+
+    deleted, errors = _do_delete(delete)
+    if errors:
+        # D7 — partial failure surfaces on stderr + exit 1.
+        for p, msg in errors:
+            _err(f"error: failed to delete {p}: {msg}")
+        print(
+            f"Deleted {len(deleted)} backup file(s); {len(errors)} failed."
+        )
+        return 1
+    print(
+        f"Deleted {len(deleted)} backup file(s); kept "
+        f"{min(found, args.keep)} most recent."
+    )
+    return 0
 
 
 def main() -> None:
