@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (v0.10 ADR 0010 freeze + Track A)
+
+- **`sentinel update` command** — check for and apply self-updates without manual `pip` / `launchctl` steps. Detects install method (pipx, pip-venv, Homebrew, editable, system Python) and routes to appropriate upgrade path.
+- **`--check` flag** — query PyPI for the latest version and report if an update is available. Exit code 0 (up to date), 2 (update available), 1 (error), or 3 (unsupported install method).
+- **Install method detection** — pure-function heuristics on `sys.executable` and `sentinel_mac.__file__` paths (no subprocess calls). Supports editable/pipx/Homebrew/pip-venv/system-Python scenarios.
+- **JSON output** — `sentinel update --check --json` emits ADR 0004 §D2 versioned envelope (`kind=update_check`) for scripting.
+- **ADR 0010** — freezes self-update interface, version comparison strategy, daemon restart sequence, menu bar UI, and CLI surface. Tracks A (detection + `--check`) and B (apply + daemon restart) separate; C (menu bar) deferred to v0.11 pending B merge.
+
 ## [0.9.0] - 2026-05-05
 
 The "polish + performance" release. Two themes — measurable
