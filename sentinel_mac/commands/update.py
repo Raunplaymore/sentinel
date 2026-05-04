@@ -1,10 +1,13 @@
-"""CLI entry point for `sentinel update` command (ADR 0010 Track A)."""
+"""CLI entry point for `sentinel update` command (ADR 0010 Track A+B)."""
 
 import argparse
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
+from sentinel_mac.core import PLIST_PATH
+from sentinel_mac.updater.apply import apply_update
 from sentinel_mac.updater.detect import (
     InstallMethod,
     detect_install_method,
@@ -63,9 +66,103 @@ def cmd_update(args: argparse.Namespace) -> int:
     apply_mode = args.apply if hasattr(args, "apply") and args.apply else False
 
     if apply_mode:
-        # Track B placeholder
-        print("--apply not implemented yet (Track B); use --check")
-        return 1
+        # Track B: --apply branch
+        method = detect_install_method()
+
+        # Early-exit for unsupported methods (D7/D6/D8)
+        if method == InstallMethod.EDITABLE:
+            source_root = get_source_root()
+            source_root_str = str(source_root) if source_root else "<source_root>"
+            message = (
+                "sentinel-mac is installed in editable/development mode.\n"
+                "Automatic update is disabled for this configuration.\n"
+                "\n"
+                "To update your source checkout:\n"
+                f"  git -C {source_root_str} pull\n"
+                "  pip install -e .    # if pyproject.toml dependencies changed"
+            )
+            if args.json:
+                print(json.dumps(_make_json_envelope("update_apply", running, message=message)))
+            else:
+                print(message)
+            return 3
+
+        if method == InstallMethod.SYSTEM_UNSAFE:
+            message = (
+                "sentinel-mac appears to be installed under the system Python\n"
+                "(/usr/bin/python3). Automatic update is not supported for this\n"
+                "configuration because write access requires sudo, which sentinel\n"
+                "will never request.\n"
+                "\n"
+                "To update manually:\n"
+                "  sudo pip install --upgrade sentinel-mac\n"
+                "  launchctl unload ~/Library/LaunchAgents/com.sentinel.agent.plist\n"
+                "  launchctl load  ~/Library/LaunchAgents/com.sentinel.agent.plist"
+            )
+            if args.json:
+                print(json.dumps(_make_json_envelope("update_apply", running, message=message)))
+            else:
+                print(message)
+            return 3
+
+        if method == InstallMethod.HOMEBREW:
+            message = (
+                "sentinel-mac appears to be managed by Homebrew.\n"
+                "Automatic update via Homebrew is planned for v0.11.\n"
+                "\n"
+                "To update now:\n"
+                "  brew upgrade sentinel-mac"
+            )
+            if args.json:
+                print(json.dumps(_make_json_envelope("update_apply", running, message=message)))
+            else:
+                print(message)
+            return 3
+
+        # PIPX and PIP_VENV proceed to apply
+        # Fetch latest version
+        latest = fetch_latest_pypi_version(timeout=5.0)
+        if latest is None:
+            message = "error: could not reach PyPI (timeout)"
+            if args.json:
+                print(json.dumps(_make_json_envelope("update_apply", running, message=message)))
+            else:
+                print(message)
+            return 1
+
+        # Check if already up to date
+        if not is_update_available(running, latest):
+            message = f"sentinel-mac {running} is already up to date."
+            if args.json:
+                envelope = {
+                    "version": 1,
+                    "kind": "update_apply",
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "data": {
+                        "from_version": running,
+                        "to_version": latest,
+                        "install_method": method.value,
+                        "result": "already_up_to_date",
+                    },
+                }
+                print(json.dumps(envelope))
+            else:
+                print(message)
+            return 0
+
+        # Get data_dir for lockfile
+        import os
+        data_dir = Path(os.environ.get("SENTINEL_DATA_DIR", Path.home() / ".sentinel"))
+
+        # Run apply_update
+        return apply_update(
+            method=method,
+            target_version=latest,
+            yes=args.yes,
+            emit_json=args.json,
+            data_dir=data_dir,
+            plist_path=PLIST_PATH,
+        )
 
     # --check mode (or default)
     method = detect_install_method()

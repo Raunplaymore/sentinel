@@ -1,7 +1,8 @@
 # ADR 0010 — Self-Update (v0.10)
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-05-04
+- **Accepted**: 2026-05-05
 - **Scope**: `sentinel_mac/commands/update.py` (new),
   `sentinel_mac/updater/` (new package: `detect.py`, `version.py`,
   `apply.py`), `sentinel_mac/menu_bar.py` (additive),

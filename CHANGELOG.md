@@ -7,13 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (v0.10 ADR 0010 Track B)
+
+- **`sentinel update --apply` flag** — implements full self-update sequence: exclusive lock (`fcntl.flock`) → stop daemon (`launchctl unload`) → install new version (pipx/pip-venv) → restart daemon (`launchctl load`) → verify version. Rollback on upgrade failure: records old version and reinstalls on non-zero exit (best-effort; documents limitation).
+- **Interactive confirmation prompt** — `--apply` without `--yes` prompts user before proceeding. Non-interactive invocation (stdin not TTY + no `--yes`) auto-cancels with warning.
+- **JSON envelope support** — `--apply --json` emits ADR 0004 §D2 versioned envelope (`kind=update_apply`) with fields: `from_version`, `to_version`, `install_method`, `result` (success|failure|cancelled|already_up_to_date|locked), `steps_completed` (list of strings), `error` (optional).
+- **ADR 0010 Status promoted to Accepted** — Track A (detection + `--check`) + Track B (apply + daemon restart) now complete and frozen. Menu bar integration (Track C) deferred to v0.11.
+
 ### Added (v0.10 ADR 0010 freeze + Track A)
 
 - **`sentinel update` command** — check for and apply self-updates without manual `pip` / `launchctl` steps. Detects install method (pipx, pip-venv, Homebrew, editable, system Python) and routes to appropriate upgrade path.
 - **`--check` flag** — query PyPI for the latest version and report if an update is available. Exit code 0 (up to date), 2 (update available), 1 (error), or 3 (unsupported install method).
 - **Install method detection** — pure-function heuristics on `sys.executable` and `sentinel_mac.__file__` paths (no subprocess calls). Supports editable/pipx/Homebrew/pip-venv/system-Python scenarios.
 - **JSON output** — `sentinel update --check --json` emits ADR 0004 §D2 versioned envelope (`kind=update_check`) for scripting.
-- **ADR 0010** — freezes self-update interface, version comparison strategy, daemon restart sequence, menu bar UI, and CLI surface. Tracks A (detection + `--check`) and B (apply + daemon restart) separate; C (menu bar) deferred to v0.11 pending B merge.
+- **ADR 0010** — freezes self-update interface, version comparison strategy, daemon restart sequence, menu bar UI, and CLI surface. Tracks A (detection + `--check`) separate from B (apply + daemon restart) and C (menu bar).
 
 ## [0.9.0] - 2026-05-05
 
