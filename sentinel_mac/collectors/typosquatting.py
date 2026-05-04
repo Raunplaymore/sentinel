@@ -5,7 +5,7 @@ of popular packages using edit distance. Flags packages that look like
 misspellings of well-known packages — a common attack vector when AI agents
 hallucinate or mistype package names.
 
-Package lists: top ~300 PyPI (2026-04) + top ~200 npm (2026-03).
+Package lists: top ~300 PyPI (2026-05) + top ~200 npm (2026-03).
 Update at each Sentinel version bump. See CLAUDE.md for instructions.
 """
 

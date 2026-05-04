@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-05-05
+
+The "polish + performance" release. Two themes — measurable
+performance + UX (Tracks 1 & 3) and tooling/type-safety ratchet
+(Track 2) — shipped over ~10 PRs since v0.8.0. 680 tests → 779
+(+99). Two new ADRs (0008 — Notification Context Level, 0009 —
+Backup Retention Policy) and one §D4 amendment (ADR 0007 —
+mtime invalidation for ProjectContext) freeze the contracts that
+landed this cycle. The mypy/ruff floor is now strict enough that
+new untyped code or mutable-default-arg bugs fail CI.
+
+### Highlights for users
+
+- **Real false-positive fix for the `Suspected Stuck Process`
+  warning** — the heuristic now consults the agent log parser's
+  most-recent user/assistant message timestamp before firing, so
+  long interactive sessions (local model thinking, batch
+  processing) with high CPU + low network are no longer flagged
+  as runaway when there has been activity in the last 5 minutes.
+  The alert still fires when the session is truly idle.
+- **`sentinel --version` is now a fast sanity check** — first
+  line keeps the legacy `sentinel-mac X.Y.Z` shape for grep, but
+  three new lines below report config path, data dir, daemon
+  status (with PID), and Claude Code hook installation. Each
+  enrichment line degrades to a short "not …" status on missing
+  files / permission errors instead of crashing — `sentinel
+  doctor` is still the right surface for full diagnosis.
+- **Three notification context levels** — new
+  `notifications.context_level` config key with `minimal` /
+  `standard` / `full`. Default `standard` matches v0.8.0 alert
+  text exactly (no upgrade-time surprise). `full` adds the git
+  `Repo: owner/repo` line under `Project:`; `minimal` strips the
+  whole `[ctx]` block for privacy-strict setups. Unknown values
+  fall back to `standard` with a `WARNING`.
+- **`sentinel doctor --cleanup-backups --keep N`** — user-initiated
+  cleanup for `<config>.bak.<epoch>` files. `--keep` is mandatory
+  (no safe default), interactive `[y/N]` prompt unless `--yes`,
+  non-TTY stdin auto-cancels with a `WARNING` so cron jobs never
+  hang. JSON envelope `kind=backup_cleanup` matching ADR 0004 §D2.
+- **Faster `git checkout` reaction in alert ctx** — ProjectContext
+  now `os.stat()`s `<root>/.git/HEAD` on every `lookup()` and drops
+  cached entries when `st_mtime_ns` advances. Branch / head changes
+  show up immediately in alerts instead of waiting for the 5-min
+  TTL. Non-git projects skip the check.
+- **Typosquatting list refreshed** to the 2026-05 PyPI top-300
+  snapshot.
+
 ### Changed (v0.9 Track 2c)
 - mypy ratchet: `disallow_untyped_defs = true`. Every `def` in
   `sentinel_mac/` now carries parameter and return-type
