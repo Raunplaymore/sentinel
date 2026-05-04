@@ -227,8 +227,8 @@ will never request.
 
 To update manually:
   sudo pip install --upgrade sentinel-mac
-  launchctl unload ~/Library/LaunchAgents/com.sentinel-mac.daemon.plist
-  launchctl load  ~/Library/LaunchAgents/com.sentinel-mac.daemon.plist
+  launchctl unload ~/Library/LaunchAgents/com.sentinel.agent.plist
+  launchctl load  ~/Library/LaunchAgents/com.sentinel.agent.plist
 ```
 
 and exits 3.
