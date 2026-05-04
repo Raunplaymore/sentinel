@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
-from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -18,7 +17,6 @@ from sentinel_mac.collectors.project_context import (
     ProjectContext,
     _normalize_github_url,
 )
-
 
 # ─── helpers ───────────────────────────────────────────────────────
 
@@ -48,10 +46,10 @@ def _write_package_json(root: Path, name: str) -> None:
 def _make_git_dir(
     root: Path,
     *,
-    head_ref: Optional[str] = "main",
-    head_sha: Optional[str] = "abcdef1234567890abcdef1234567890abcdef12",
-    remote_url: Optional[str] = None,
-    detached_sha: Optional[str] = None,
+    head_ref: str | None = "main",
+    head_sha: str | None = "abcdef1234567890abcdef1234567890abcdef12",
+    remote_url: str | None = None,
+    detached_sha: str | None = None,
     packed_refs: bool = False,
 ) -> Path:
     """Create a fake .git/ directory under ``root``.
@@ -472,13 +470,12 @@ class TestProjectContextCaching:
         import time as _time
         future = _time.monotonic() + 5.0
         with patch("sentinel_mac.collectors.project_context.time.monotonic",
-                   return_value=future):
-            with patch.object(
-                ProjectContext, "_resolve",
-                return_value={"name": "FRESH", "root": "/x", "git": None},
-            ) as mocked:
-                meta = ctx.lookup(str(proj))
-                assert mocked.call_count == 1
+                   return_value=future), patch.object(
+            ProjectContext, "_resolve",
+            return_value={"name": "FRESH", "root": "/x", "git": None},
+        ) as mocked:
+            meta = ctx.lookup(str(proj))
+            assert mocked.call_count == 1
         assert meta["name"] == "FRESH"
 
     def test_max_entries_lru_eviction(self, tmp_path):
@@ -523,7 +520,7 @@ class TestProjectContextCaching:
         _write_pyproject_pep621(proj, "concurrent")
 
         ctx = ProjectContext()
-        results: list[Optional[dict]] = []
+        results: list[dict | None] = []
         errors: list[BaseException] = []
 
         def worker():
@@ -715,7 +712,6 @@ class TestMtimeInvalidation:
         #   1. NOT raise to the caller.
         #   2. NOT invalidate the cache (head_mtime returns None means
         #      "skip the check").
-        import os as _os
 
         def _raise(*_a, **_kw):
             raise PermissionError("simulated EACCES on .git/HEAD")
@@ -744,14 +740,13 @@ class TestMtimeInvalidation:
         with patch(
             "sentinel_mac.collectors.project_context.time.monotonic",
             return_value=future,
-        ):
-            with patch.object(
-                ProjectContext, "_resolve",
-                return_value={"name": "FRESH", "root": str(proj), "git": None},
-            ) as mocked:
-                meta = ctx.lookup(str(proj))
-                # TTL expired → recompute happened.
-                assert mocked.call_count == 1
+        ), patch.object(
+            ProjectContext, "_resolve",
+            return_value={"name": "FRESH", "root": str(proj), "git": None},
+        ) as mocked:
+            meta = ctx.lookup(str(proj))
+            # TTL expired → recompute happened.
+            assert mocked.call_count == 1
         assert meta["name"] == "FRESH"
 
     def test_head_mtime_helper_returns_none_for_missing_file(self, tmp_path):

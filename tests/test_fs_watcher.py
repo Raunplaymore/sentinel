@@ -2,16 +2,13 @@
 import os
 import queue
 import tempfile
-import time
-import pytest
 from datetime import datetime
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from sentinel_mac.collectors.fs_watcher import FSWatcher
-from sentinel_mac.engine import AlertEngine
-from sentinel_mac.models import SecurityEvent, Alert
 from sentinel_mac.core import DEFAULT_CONFIG
-
+from sentinel_mac.engine import AlertEngine
+from sentinel_mac.models import SecurityEvent
 
 # ─── FSWatcher unit tests ───
 
@@ -154,7 +151,7 @@ class TestFSWatcherEventHandling:
         watcher, q = self._make_watcher()
         ssh_path = os.path.expanduser("~/.ssh/id_rsa")
         with patch.object(watcher, "_identify_actor", return_value=(0, "unknown")):
-            for i in range(5):
+            for _ in range(5):
                 watcher._handle_fs_event(ssh_path, "file_modify")
         # Should have individual events + one bulk_change event
         events = []

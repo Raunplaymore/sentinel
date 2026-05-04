@@ -23,6 +23,7 @@ Run with `sentinel-app` after `pip install -e '.[app]'`.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import logging
 import os
@@ -32,7 +33,7 @@ import sys
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import IO, Any, Optional
+from typing import IO, Any
 
 import rumps
 from ruamel.yaml import YAML
@@ -149,10 +150,10 @@ AGENT_LOG_SUBRULES: list[dict] = [
 
 # Held for the lifetime of the process — losing this reference would release
 # the flock and let a second instance start.
-_singleton_lock_handle: Optional[IO] = None
+_singleton_lock_handle: IO | None = None
 
 
-def _parse_log_timestamp(line: str) -> Optional[datetime]:
+def _parse_log_timestamp(line: str) -> datetime | None:
     m = _LOG_TS_RE.match(line)
     if not m:
         return None
@@ -163,7 +164,7 @@ def _parse_log_timestamp(line: str) -> Optional[datetime]:
 
 
 def _recent_log_entries(
-    log_path: Path, hours: int, min_level: Optional[str] = None
+    log_path: Path, hours: int, min_level: str | None = None
 ) -> list[str]:
     """Return log entries within the last N hours, oldest-first.
 
@@ -256,7 +257,7 @@ def _acquire_singleton_lock() -> bool:
     global _singleton_lock_handle
     lock_dir = Path.home() / ".local" / "share" / "sentinel"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    _singleton_lock_handle = open(lock_dir / "sentinel-app.lock", "w")
+    _singleton_lock_handle = open(lock_dir / "sentinel-app.lock", "w")  # noqa: SIM115 — singleton lock retained for the app lifetime via module global.
     try:
         fcntl.flock(_singleton_lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -270,20 +271,20 @@ class SentinelApp(rumps.App):
     def __init__(self) -> None:
         super().__init__("Sentinel", title="🛡 …", quit_button=None)
 
-        self._config_path: Optional[Path] = resolve_config_path()
+        self._config_path: Path | None = resolve_config_path()
         self._config = load_config(self._config_path)
         self._collector = MacOSCollector()
         self._engine = AlertEngine(self._config)
         self._paused = False
-        self._last_metrics: Optional[SystemMetrics] = None
+        self._last_metrics: SystemMetrics | None = None
         self._alert_history: list[tuple[datetime, Alert]] = []
         self._rule_items: dict[str, rumps.MenuItem] = {}
 
         # Try to take over the Sentinel daemon role. If the LaunchAgent (or
         # another sentinel-app) already holds the lock, fall through to
         # viewer-only mode.
-        self._daemon: Optional[Sentinel] = None
-        self._daemon_thread: Optional[threading.Thread] = None
+        self._daemon: Sentinel | None = None
+        self._daemon_thread: threading.Thread | None = None
         self._daemon_status: str = "viewer"  # "active" | "viewer" | "error"
         self._start_embedded_daemon()
 
@@ -468,7 +469,7 @@ class SentinelApp(rumps.App):
         )
 
     def _open_log_view(
-        self, min_level: Optional[str], suffix: str, label: str
+        self, min_level: str | None, suffix: str, label: str
     ) -> None:
         data_dir = resolve_data_dir()
         log_path = data_dir / "sentinel.log"
@@ -525,16 +526,14 @@ class SentinelApp(rumps.App):
             rumps.alert("Could not save config", str(exc))
             return
 
-        try:
+        # Notifications can fail on first run before TCC consent.
+        with contextlib.suppress(Exception):
             rumps.notification(
                 "Setting saved",
                 rule["title"],
                 "Restart the daemon to apply: launchctl unload/load "
                 "~/Library/LaunchAgents/com.sentinel.agent.plist",
             )
-        except Exception:
-            # Notifications can fail on first run before TCC consent.
-            pass
 
     def _on_about_rules(self, _sender) -> None:
         lines = ["Sentinel watches the following AI behaviors:", ""]
@@ -667,10 +666,8 @@ def main() -> None:
             "Quit the existing one (menu → Quit Sentinel) before launching a new one."
         )
         print(f"sentinel-app: {message}", file=sys.stderr)
-        try:
+        with contextlib.suppress(Exception):
             rumps.alert("Sentinel already running", message)
-        except Exception:
-            pass
         sys.exit(1)
     SentinelApp().run()
 

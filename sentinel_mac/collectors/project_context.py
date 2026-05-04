@@ -41,7 +41,6 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +148,7 @@ class ProjectContext:
         # stat failed). On lookup, a non-None value is compared to the
         # current st_mtime_ns; mismatch drops the entry and recomputes.
         # Cache shape extension is internal — public API unchanged.
-        self._cache: "OrderedDict[str, tuple[Optional[dict], float, Optional[int]]]" = OrderedDict()
+        self._cache: OrderedDict[str, tuple[dict | None, float, int | None]] = OrderedDict()
         self._lock: threading.RLock = threading.RLock()
         # ADR 0007 §D4 amendment — track which cwds have already logged a
         # stat failure this session, so the DEBUG line lands once per
@@ -157,7 +156,7 @@ class ProjectContext:
         self._stat_failure_logged: set[str] = set()
 
     @classmethod
-    def from_config(cls, config: dict) -> "ProjectContext":
+    def from_config(cls, config: dict) -> ProjectContext:
         """Build a ProjectContext from the parsed sentinel config dict.
 
         Reads ``config["security"]["project_context"]``. All sub-keys are
@@ -206,10 +205,10 @@ class ProjectContext:
 
     def lookup(
         self,
-        cwd: Optional[str],
+        cwd: str | None,
         *,
-        branch_hint: Optional[str] = None,
-    ) -> Optional[dict]:
+        branch_hint: str | None = None,
+    ) -> dict | None:
         """Resolve ``cwd`` to a frozen ``project_meta`` dict (or None).
 
         ADR 0007 §D3 schema. Returns None when:
@@ -286,7 +285,7 @@ class ProjectContext:
         # Capture the .git/HEAD mtime at insert time so the next lookup
         # can detect a branch switch via the §D4 amendment path. None
         # for non-git projects or stat failures.
-        head_mtime: Optional[int] = None
+        head_mtime: int | None = None
         if isinstance(resolved, dict):
             root_str = resolved.get("root")
             if isinstance(root_str, str) and root_str:
@@ -301,7 +300,7 @@ class ProjectContext:
 
         return self._apply_branch_hint(resolved, branch_hint)
 
-    def _head_mtime_ns(self, root: Path) -> Optional[int]:
+    def _head_mtime_ns(self, root: Path) -> int | None:
         """ADR 0007 §D4 amendment — return ``st_mtime_ns`` of
         ``<root>/.git/HEAD`` or None.
 
@@ -334,7 +333,7 @@ class ProjectContext:
                 )
             return None
 
-    def invalidate(self, cwd: Optional[str] = None) -> None:
+    def invalidate(self, cwd: str | None = None) -> None:
         """Drop one cache entry (when ``cwd`` given) or the whole cache.
 
         v0.8: not called from production code paths — defined for tests
@@ -358,8 +357,8 @@ class ProjectContext:
 
     @staticmethod
     def _apply_branch_hint(
-        meta: Optional[dict], branch_hint: Optional[str]
-    ) -> Optional[dict]:
+        meta: dict | None, branch_hint: str | None
+    ) -> dict | None:
         """Return a deep copy of ``meta`` with ``git.branch`` overridden.
 
         - ``meta`` is None → return None (no synthesized project).
@@ -388,7 +387,7 @@ class ProjectContext:
                 }
         return result
 
-    def _resolve(self, normalized_cwd: str) -> Optional[dict]:
+    def _resolve(self, normalized_cwd: str) -> dict | None:
         """Walk up from ``normalized_cwd`` and build the project_meta dict.
 
         Caller passes a realpath-normalized absolute path. Returns None
@@ -414,7 +413,7 @@ class ProjectContext:
             "git": git,
         }
 
-    def _find_project_root(self, start: Path) -> Optional[Path]:
+    def _find_project_root(self, start: Path) -> Path | None:
         """Walk up from ``start``, returning the first directory containing
         any of ``_PROJECT_MARKERS``. Returns None if none found within
         ``max_walk_depth`` parents.
@@ -459,7 +458,7 @@ class ProjectContext:
         return root.name or str(root)
 
     @staticmethod
-    def _extract_pyproject_name(path: Path) -> Optional[str]:
+    def _extract_pyproject_name(path: Path) -> str | None:
         """Extract ``name`` from ``[project]`` then ``[tool.poetry]``
         sections of a pyproject.toml. Regex-only — avoids the tomllib
         dependency (Python 3.11+) so 3.8/3.9/3.10 don't need a polyfill.
@@ -472,9 +471,9 @@ class ProjectContext:
         except OSError:
             return None
 
-        project_name: Optional[str] = None
-        poetry_name: Optional[str] = None
-        current_section: Optional[str] = None
+        project_name: str | None = None
+        poetry_name: str | None = None
+        current_section: str | None = None
 
         for raw in text.splitlines():
             line = raw.rstrip()
@@ -495,7 +494,7 @@ class ProjectContext:
         return project_name or poetry_name
 
     @staticmethod
-    def _extract_package_json_name(path: Path) -> Optional[str]:
+    def _extract_package_json_name(path: Path) -> str | None:
         """Extract ``name`` from a package.json file.
 
         Uses the stdlib ``json`` module defensively — any parse failure or
@@ -503,7 +502,7 @@ class ProjectContext:
         """
         import json
         try:
-            with open(path, "r", encoding="utf-8") as fh:
+            with open(path, encoding="utf-8") as fh:
                 obj = json.load(fh)
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             return None
@@ -514,7 +513,7 @@ class ProjectContext:
             return name.strip()
         return None
 
-    def _resolve_git(self, root: Path) -> Optional[dict]:
+    def _resolve_git(self, root: Path) -> dict | None:
         """Resolve the ``git`` sub-dict for ``root`` (ADR 0007 §D3).
 
         Walks up from ``root`` once to find the nearest ``.git/`` (since
@@ -541,7 +540,7 @@ class ProjectContext:
         }
 
     @staticmethod
-    def _find_git_root(start: Path) -> Optional[Path]:
+    def _find_git_root(start: Path) -> Path | None:
         """Walk up from ``start`` looking for a directory that contains
         ``.git/``. Returns the parent dir (the git work-tree root) or None.
 
@@ -566,7 +565,7 @@ class ProjectContext:
         return None
 
     @staticmethod
-    def _read_git_head(git_dir: Path) -> tuple[Optional[str], Optional[str]]:
+    def _read_git_head(git_dir: Path) -> tuple[str | None, str | None]:
         """Return ``(branch, head_short_sha)`` from ``.git/HEAD``.
 
         - ``ref: refs/heads/<x>`` → branch=<x>, head=first 8 chars of SHA
@@ -599,7 +598,7 @@ class ProjectContext:
         return None, None
 
     @staticmethod
-    def _read_ref_sha(git_dir: Path, branch: str) -> Optional[str]:
+    def _read_ref_sha(git_dir: Path, branch: str) -> str | None:
         """Resolve ``refs/heads/<branch>`` to a full SHA.
 
         Tries the loose ref file first (``.git/refs/heads/<branch>``),
@@ -622,7 +621,7 @@ class ProjectContext:
             if not packed.exists():
                 return None
             target = f"refs/heads/{branch}"
-            with open(packed, "r", encoding="utf-8") as fh:
+            with open(packed, encoding="utf-8") as fh:
                 for raw in fh:
                     line = raw.strip()
                     if not line or line.startswith("#") or line.startswith("^"):
@@ -639,7 +638,7 @@ class ProjectContext:
         return None
 
     @staticmethod
-    def _read_git_remote(git_dir: Path) -> Optional[str]:
+    def _read_git_remote(git_dir: Path) -> str | None:
         """Parse ``.git/config`` and return the GitHub-shaped ``owner/repo``
         for ``[remote "origin"]`` (preferred) or the first ``[remote "*"]``
         section. Returns None when no GitHub-shaped URL is found.
@@ -658,8 +657,8 @@ class ProjectContext:
         # Two-pass: first collect URL strings keyed by remote name, then
         # apply the precedence rule (origin first, otherwise the first
         # remote encountered).
-        remote_urls: "OrderedDict[str, str]" = OrderedDict()
-        current_remote: Optional[str] = None
+        remote_urls: OrderedDict[str, str] = OrderedDict()
+        current_remote: str | None = None
 
         for raw in text.splitlines():
             line = raw.split("#", 1)[0].split(";", 1)[0].rstrip()
@@ -671,10 +670,7 @@ class ProjectContext:
             if section_m:
                 kind = section_m.group(1).strip().lower()
                 subname = section_m.group(2)
-                if kind == "remote" and subname:
-                    current_remote = subname
-                else:
-                    current_remote = None
+                current_remote = subname if kind == "remote" and subname else None
                 continue
 
             if current_remote is None:
@@ -684,7 +680,7 @@ class ProjectContext:
                 remote_urls[current_remote] = url_m.group(1).strip()
 
         # Precedence: origin first, then first inserted.
-        chosen_url: Optional[str] = remote_urls.get("origin")
+        chosen_url: str | None = remote_urls.get("origin")
         if chosen_url is None and remote_urls:
             chosen_url = next(iter(remote_urls.values()))
 
@@ -696,7 +692,7 @@ class ProjectContext:
 # ── module-level helpers (private) ───────────────────────────────
 
 
-def _normalize_github_url(url: str) -> Optional[str]:
+def _normalize_github_url(url: str) -> str | None:
     """Reduce a remote URL to ``owner/repo`` when it is GitHub-shaped.
 
     Recognized inputs:

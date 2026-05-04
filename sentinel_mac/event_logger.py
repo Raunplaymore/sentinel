@@ -4,6 +4,7 @@ Writes SecurityEvents to daily JSONL files for audit trail and Phase 2 team dash
 Files are stored at: <data_dir>/events/YYYY-MM-DD.jsonl
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -203,14 +204,12 @@ class EventLogger:
             self._current_file is not None
             and self._current_date == target_date.strftime("%Y-%m-%d")
         ):
-            try:
+            with contextlib.suppress(Exception):  # pragma: no cover — best-effort flush
                 self._current_file.flush()
-            except Exception:  # pragma: no cover — best-effort flush
-                pass
 
         matched = False
         try:
-            with open(path, "r", encoding="utf-8") as src:
+            with open(path, encoding="utf-8") as src:
                 lines = src.readlines()
         except OSError as exc:
             logger.error(
@@ -255,10 +254,8 @@ class EventLogger:
             logger.error(
                 f"_rewrite_one_locked: rewrite failed for {path}: {exc}"
             )
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
-            except OSError:
-                pass
             return False
 
         # If the rewritten file is the one we currently have open for
@@ -268,11 +265,9 @@ class EventLogger:
             self._current_file is not None
             and self._current_date == target_date.strftime("%Y-%m-%d")
         ):
-            try:
+            with contextlib.suppress(Exception):  # pragma: no cover
                 self._current_file.close()
-            except Exception:  # pragma: no cover
-                pass
-            self._current_file = open(path, "a", encoding="utf-8")
+            self._current_file = open(path, "a", encoding="utf-8")  # noqa: SIM115 — long-lived rotating log handle managed by close()/_rotate().
 
         return True
 
@@ -281,7 +276,7 @@ class EventLogger:
         if self._current_file:
             self._current_file.close()
         path = self._events_dir / f"{date_str}.jsonl"
-        self._current_file = open(path, "a", encoding="utf-8")
+        self._current_file = open(path, "a", encoding="utf-8")  # noqa: SIM115 — long-lived rotating log handle owned by EventLogger lifetime.
         self._current_date = date_str
         self._cleanup()
 

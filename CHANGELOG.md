@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed (v0.9 Track 2a)
+- Ruff lint ratchet — added rule sets:
+  - `B` (bugbear) — surface real bugs (mutable default args,
+    unused loop variables, raise-from, etc.).
+  - `UP` (pyupgrade) — Python 3.8+ syntax modernization
+    (`Optional[X]` → `X | None` under
+    `from __future__ import annotations`, `open(..., "r")` →
+    `open(...)`, `str.format` → f-string).
+  - `SIM` (simplify) — minor cleanup (`try/except/pass` →
+    `contextlib.suppress`, ternary collapses, nested-`if` flattening,
+    `any(...)` collapses, Yoda-condition swaps).
+  - 212 violations across the three rule sets were resolved
+    (B: 1, UP: 106, SIM: 33 surface + 72 follow-ups via
+    auto-fixers); 4 `# noqa: SIM115` annotations were retained
+    with explicit rationale (long-lived daemon / app / log file
+    handles whose ownership is intentionally hand-managed).
+- Per-file-ignores cleanup — v0.6 Track C's temporary
+  `sentinel_mac/{collectors,core,engine,models,notifier,menubar_app}`
+  per-file `F401` / `F541` / `F841` / `I001` ignores were dropped:
+  the underlying violations are gone after the auto-fix pass.
+  `tests/*` keeps `E402` only (path-manipulation-then-import is a
+  legitimate test pattern).
+
 ### Changed (v0.9 Track 1)
 - Profile pass on three representative workloads (busy JSONL with
   1000 mixed Claude Code records, fs_watcher 100-event bulk_change

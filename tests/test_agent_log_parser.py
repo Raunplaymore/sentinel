@@ -4,25 +4,22 @@ import os
 import queue
 import tempfile
 import time
+from datetime import datetime, timezone
+from typing import Optional
 
 import pytest
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Optional
-from unittest.mock import patch
 
 from sentinel_mac.collectors.agent_log_parser import (
-    AgentLogParser,
+    _TRUST_DOWNGRADABLE_REASONS,
     HIGH_RISK_PATTERNS,
     MCP_INJECTION_PATTERNS,
-    _TRUST_DOWNGRADABLE_REASONS,
+    AgentLogParser,
     _extract_ssh_host,
 )
-from sentinel_mac.collectors.context import HostContext, TrustLevel
+from sentinel_mac.collectors.context import HostContext
+from sentinel_mac.core import DEFAULT_CONFIG
 from sentinel_mac.engine import AlertEngine
 from sentinel_mac.models import SecurityEvent
-from sentinel_mac.core import DEFAULT_CONFIG
-
 
 # ─── AgentLogParser unit tests ───
 
@@ -1109,10 +1106,10 @@ class TestAgentLogParserWithContext:
         downgrade to SSH/SCP only. Any change here MUST be paired with a
         superseding ADR — fail loudly if the constant drifts.
         """
-        assert _TRUST_DOWNGRADABLE_REASONS == frozenset({
+        assert frozenset({
             "SSH connection",
             "SCP file transfer",
-        })
+        }) == _TRUST_DOWNGRADABLE_REASONS
 
 
 # ─── v0.8 defect fix: typosquatting risk_score + false-positive regression ───
@@ -1310,7 +1307,6 @@ class TestSessionMetaExtraction:
         return AgentLogParser(config, q), q
 
     def test_housekeeping_record_does_not_populate_meta(self):
-        from sentinel_mac.collectors.agent_log_parser import SessionMeta
         parser, _ = self._make_parser()
         parser._current_file = "/fake/sess.jsonl"
         parser._update_session_meta(

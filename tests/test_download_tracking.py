@@ -21,7 +21,7 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,11 +32,10 @@ from sentinel_mac.collectors.agent_log_parser import (
     _evaluate_download_risk,
     _extract_download,
 )
-from sentinel_mac.collectors.context import HostContext, TrustLevel
-from sentinel_mac.collectors.fs_watcher import FSWatcher, PendingDownload
+from sentinel_mac.collectors.context import HostContext
+from sentinel_mac.collectors.fs_watcher import FSWatcher
 from sentinel_mac.event_logger import EventLogger
 from sentinel_mac.models import SecurityEvent
-
 
 # ────────────────────────────────────────────────────────────────────────
 # 1. _extract_download — parser unit tests (ADR 0002 §D4)

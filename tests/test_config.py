@@ -1,20 +1,18 @@
 """Tests for configuration loading and validation."""
 import json
-import pytest
-import tempfile
 from pathlib import Path
 
 from sentinel_mac import core as core_mod
 from sentinel_mac.core import (
     DEFAULT_CONFIG,
-    load_config,
-    _validate_config,
-    resolve_config_path,
     _print_version_snapshot,
+    _validate_config,
     _version_config_line,
-    _version_data_dir_line,
     _version_daemon_line,
+    _version_data_dir_line,
     _version_hook_line,
+    load_config,
+    resolve_config_path,
 )
 
 
@@ -205,9 +203,10 @@ class TestContextLevelValidation:
         abort the reload. _validate_reload_config normalizes the value
         in-place rather than raising."""
         # Late import to avoid a top-level dependency on Sentinel class.
-        from sentinel_mac.core import Sentinel as _Sentinel  # noqa: F401
         from unittest.mock import MagicMock
+
         from sentinel_mac import core as _core
+        from sentinel_mac.core import Sentinel as _Sentinel  # noqa: F401
 
         # Borrow the validator off an instance without running __init__
         # (which has heavy side effects). The method only touches its

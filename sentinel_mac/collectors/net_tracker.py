@@ -14,9 +14,9 @@ from typing import Optional
 
 import psutil
 
-from sentinel_mac.models import SecurityEvent
 from sentinel_mac.collectors.context import HostContext, TrustLevel
 from sentinel_mac.collectors.system import MacOSCollector
+from sentinel_mac.models import SecurityEvent
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +229,4 @@ class NetTracker:
             if fnmatch.fnmatch(ip, pattern):
                 return True
         # Localhost is always allowed
-        if ip.startswith("127.") or ip == "::1" or hostname == "localhost":
-            return True
-        return False
+        return bool(ip.startswith("127.") or ip == "::1" or hostname == "localhost")

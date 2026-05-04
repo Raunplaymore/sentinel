@@ -1,11 +1,12 @@
 """Sentinel — System Metrics Collector (macOS-specific)."""
 
-import psutil
+import re
 import shutil
 import subprocess
-import re
 import time
 from typing import Optional
+
+import psutil
 
 from sentinel_mac.models import SystemMetrics
 

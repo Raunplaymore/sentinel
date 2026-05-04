@@ -13,7 +13,6 @@ import re
 import shlex
 from typing import Optional
 
-
 # ── Popular PyPI packages (top ~300, 2026-05) ────────────────────────────────
 POPULAR_PYPI = {
     "aiobotocore", "aiofiles", "aiohappyeyeballs", "aiohttp", "aiosignal", "alembic",
@@ -148,18 +147,14 @@ def _is_valid_pip_name(name: str) -> bool:
     if not _PIP_NAME_RE.match(name):
         return False
     # Pure-digit "names" are PEP 503 valid technically but never real packages.
-    if name.isdigit():
-        return False
-    return True
+    return not name.isdigit()
 
 
 def _is_valid_npm_name(name: str) -> bool:
     """npm registry rules + reject pure-numeric noise."""
     if not _NPM_NAME_RE.match(name):
         return False
-    if name.isdigit():
-        return False
-    return True
+    return not name.isdigit()
 
 
 # Shell metachars that terminate a subcommand or redirect its I/O.

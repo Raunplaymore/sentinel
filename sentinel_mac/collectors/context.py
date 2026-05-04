@@ -28,6 +28,7 @@ deferred to v0.7. See ``docs/decisions/0001-host-context.md``.
 
 from __future__ import annotations
 
+import contextlib
 import enum
 import fnmatch
 import ipaddress
@@ -38,7 +39,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
+from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ class TrustLevel(str, enum.Enum):
     BLOCKED = "blocked"
 
     @classmethod
-    def rank(cls, level: "TrustLevel") -> int:
+    def rank(cls, level: TrustLevel) -> int:
         """Numeric rank for comparison. UNKNOWN=0, LEARNED=1, KNOWN=2, BLOCKED=3."""
         return _TRUST_RANK[level]
 
@@ -135,12 +136,12 @@ class HostContext:
         *,
         enabled: bool,
         cache_path: Path,
-        known_hosts_path: Optional[Path] = None,
+        known_hosts_path: Path | None = None,
         auto_trust_after_seen: int = 5,
         learning_window_days: int = 30,
         dedup_window_seconds: int = 3600,
         max_tracked_hosts: int = 5000,
-        blocklist: Optional[Iterable[str]] = None,
+        blocklist: Iterable[str] | None = None,
     ) -> None:
         """Construct a HostContext.
 
@@ -191,7 +192,7 @@ class HostContext:
 
         self._enabled: bool = bool(enabled)
         self._cache_path: Path = Path(cache_path)
-        self._known_hosts_path: Optional[Path] = (
+        self._known_hosts_path: Path | None = (
             Path(known_hosts_path) if known_hosts_path is not None else None
         )
         self._auto_trust_after_seen: int = auto_trust_after_seen
@@ -219,7 +220,7 @@ class HostContext:
         self._lock: threading.Lock = threading.Lock()
 
     @classmethod
-    def from_config(cls, config: dict) -> "HostContext":
+    def from_config(cls, config: dict) -> HostContext:
         """Build a HostContext from the parsed sentinel config dict.
 
         Reads ``config["security"]["context_aware"]``. If the section is
@@ -244,7 +245,7 @@ class HostContext:
         max_tracked_hosts = int(section.get("max_tracked_hosts", 5000))
 
         known_hosts_raw = section.get("known_hosts_path", "~/.ssh/known_hosts")
-        known_hosts_path: Optional[Path]
+        known_hosts_path: Path | None
         if known_hosts_raw == "" or known_hosts_raw is None:
             known_hosts_path = None
         else:
@@ -337,10 +338,8 @@ class HostContext:
                         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
                 # Tighten permissions before replace so the visible file is
                 # never world-readable.
-                try:
+                with contextlib.suppress(OSError):
                     os.chmod(tmp_path, 0o600)
-                except OSError:
-                    pass
                 os.replace(tmp_path, cache_path)
                 self._dirty = False
             except OSError as exc:
@@ -448,7 +447,7 @@ class HostContext:
 
     # ── mutation ─────────────────────────────────────────────────
 
-    def observe(self, host: str, *, now_epoch: Optional[int] = None) -> None:
+    def observe(self, host: str, *, now_epoch: int | None = None) -> None:
         """Record an observation of ``host``.
 
         Deduplicated within ``dedup_window_seconds``: rapid repeats for the
@@ -570,19 +569,13 @@ class HostContext:
         """True iff ``host`` matches the configured blocklist."""
         if host in self._blocklist_literal:
             return True
-        for pattern in self._blocklist_wildcard:
-            if fnmatch.fnmatchcase(host, pattern):
-                return True
-        return False
+        return any(fnmatch.fnmatchcase(host, pattern) for pattern in self._blocklist_wildcard)
 
     def _matches_known_hosts(self, host: str) -> bool:
         """True iff ``host`` matches any loaded known_hosts entry."""
         if host in self._known_hosts_literal:
             return True
-        for pattern in self._known_hosts_wildcard:
-            if fnmatch.fnmatchcase(host, pattern):
-                return True
-        return False
+        return any(fnmatch.fnmatchcase(host, pattern) for pattern in self._known_hosts_wildcard)
 
     def _load_known_hosts_locked(self) -> None:
         """Parse known_hosts into literal/wildcard sets. Caller holds lock."""
@@ -602,7 +595,7 @@ class HostContext:
 
         hashed_count = 0
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            with open(path, encoding="utf-8", errors="replace") as fh:
                 for raw_line in fh:
                     parsed = _parse_known_hosts_line(raw_line)
                     if parsed is None:
@@ -643,7 +636,7 @@ class HostContext:
             return
 
         try:
-            with open(path, "r", encoding="utf-8") as fh:
+            with open(path, encoding="utf-8") as fh:
                 lines = fh.readlines()
         except OSError as exc:
             logger.warning("HostContext: cannot read cache %s: %s", path, exc)
@@ -797,7 +790,7 @@ def _split_blocklist(items: Iterable[str]) -> tuple[set[str], list[str]]:
     return literal, wildcard
 
 
-def _parse_known_hosts_line(raw_line: str) -> Optional[tuple[bool, list[str]]]:
+def _parse_known_hosts_line(raw_line: str) -> tuple[bool, list[str]] | None:
     """Parse one known_hosts line.
 
     Returns ``(is_hashed, patterns)`` or ``None`` for blank/comment lines.
@@ -846,8 +839,5 @@ def _parse_known_hosts_line(raw_line: str) -> Optional[tuple[bool, list[str]]]:
 def _resolve_default_cache_path() -> Path:
     """Return ``$XDG_DATA_HOME/sentinel/host_context.jsonl`` (or fallback)."""
     xdg = os.environ.get("XDG_DATA_HOME")
-    if xdg:
-        base = Path(xdg)
-    else:
-        base = Path("~/.local/share").expanduser()
+    base = Path(xdg) if xdg else Path("~/.local/share").expanduser()
     return base / "sentinel" / "host_context.jsonl"

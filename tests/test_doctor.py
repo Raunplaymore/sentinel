@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 from pathlib import Path
 
 import pytest
@@ -444,7 +443,7 @@ class TestDoctorCli:
         assert rc == 0
 
     def test_json_envelope_shape(self, isolated_home, capsys):
-        rc = doc.dispatch(["--json"])
+        doc.dispatch(["--json"])
         env = _read_last_json(capsys)
         # ADR 0004 §D2 verbatim shape.
         assert set(env.keys()) == {"version", "kind", "generated_at", "data"}
@@ -487,7 +486,7 @@ class TestDoctorCli:
     def test_config_flag_propagates(self, isolated_home, tmp_path, capsys):
         cfg = tmp_path / "explicit.yaml"
         cfg.write_text("check_interval_seconds: 30\n", encoding="utf-8")
-        rc = doc.dispatch(["--config", str(cfg), "--json"])
+        doc.dispatch(["--config", str(cfg), "--json"])
         env = _read_last_json(capsys)
         config_row = next(
             r for r in env["data"]["checks"] if r["name"] == "config"

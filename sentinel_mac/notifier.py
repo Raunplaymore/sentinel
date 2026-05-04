@@ -11,12 +11,12 @@ Design principles:
 import logging
 import shutil
 import subprocess
-import requests
 from collections import deque
 from typing import Protocol
 
-from sentinel_mac.models import SystemMetrics, Alert
+import requests
 
+from sentinel_mac.models import Alert, SystemMetrics
 
 # ─── Channel Protocol ───
 
@@ -281,7 +281,7 @@ class NotificationManager:
 
     def send_status(self, m: SystemMetrics):
         """Send periodic status report. Status is always sent (operational heartbeat)."""
-        cpu_temp = " | {}°C".format(m.cpu_temp) if m.cpu_temp else ""
+        cpu_temp = f" | {m.cpu_temp}°C" if m.cpu_temp else ""
         lines = [
             f"CPU: {m.cpu_percent}%{cpu_temp}",
             f"MEM: {m.memory_percent}% ({m.memory_used_gb}GB)",
@@ -289,7 +289,7 @@ class NotificationManager:
         ]
         if m.battery_percent is not None:
             plug = "\U0001f50c" if m.battery_plugged else "\U0001f50b"
-            bat_remaining = " ({} min)".format(m.battery_minutes_left) if m.battery_minutes_left else ""
+            bat_remaining = f" ({m.battery_minutes_left} min)" if m.battery_minutes_left else ""
             lines.append(f"BAT: {plug} {m.battery_percent}%{bat_remaining}")
         if m.fan_speed_rpm:
             lines.append(f"FAN: {m.fan_speed_rpm} RPM")

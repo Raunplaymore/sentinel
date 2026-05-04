@@ -1,13 +1,15 @@
 """Tests for notification system: NotificationManager, NtfyNotifier, MacOSNotifier, SlackNotifier, TelegramNotifier."""
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from sentinel_mac.notifier import (
-    NtfyNotifier, NotificationManager, MacOSNotifier, SlackNotifier, TelegramNotifier,
-)
-from sentinel_mac.models import Alert
 from sentinel_mac.core import DEFAULT_CONFIG
-
+from sentinel_mac.models import Alert
+from sentinel_mac.notifier import (
+    MacOSNotifier,
+    NotificationManager,
+    NtfyNotifier,
+    SlackNotifier,
+    TelegramNotifier,
+)
 
 # ─── NtfyNotifier unit tests ───
 

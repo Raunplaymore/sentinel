@@ -1,17 +1,13 @@
 """Tests for NetTracker and network security event evaluation."""
 import queue
-import pytest
 from datetime import datetime
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-from collections import namedtuple
+from unittest.mock import MagicMock, patch
 
-from sentinel_mac.collectors.context import HostContext, TrustLevel
+from sentinel_mac.collectors.context import HostContext
 from sentinel_mac.collectors.net_tracker import NetTracker
+from sentinel_mac.core import DEFAULT_CONFIG
 from sentinel_mac.engine import AlertEngine
 from sentinel_mac.models import SecurityEvent
-from sentinel_mac.core import DEFAULT_CONFIG
-
 
 # ─── NetTracker unit tests ───
 

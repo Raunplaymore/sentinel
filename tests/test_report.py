@@ -22,7 +22,6 @@ from sentinel_mac.core import (
     parse_since,
 )
 
-
 # ─── Fixtures ────────────────────────────────────────────────────────────────
 
 
