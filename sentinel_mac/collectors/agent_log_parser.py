@@ -1166,7 +1166,7 @@ class AgentLogParser:
     def _check_typosquatting(self, command: str,
                              timestamp: datetime) -> list[SecurityEvent]:
         """Check pip/npm install commands for typosquatted package names."""
-        events = []
+        events: list[SecurityEvent] = []
 
         packages = extract_pip_packages(command)
         if packages:

@@ -104,7 +104,7 @@ class NtfyNotifier:
     def __init__(self, topic: str, server: str = "https://ntfy.sh"):
         self.topic = topic
         self.server = server
-        self._retry_queue: deque = deque(maxlen=self.RETRY_QUEUE_SIZE)
+        self._retry_queue: deque[tuple[Alert, int]] = deque(maxlen=self.RETRY_QUEUE_SIZE)
 
     @property
     def name(self) -> str:
@@ -139,11 +139,11 @@ class NtfyNotifier:
             logging.error(f"[ntfy] Send failed: {e}")
             return False
 
-    def _flush_retries(self):
+    def _flush_retries(self) -> None:
         if not self._retry_queue:
             return
 
-        remaining = deque(maxlen=self.RETRY_QUEUE_SIZE)
+        remaining: deque[tuple[Alert, int]] = deque(maxlen=self.RETRY_QUEUE_SIZE)
         while self._retry_queue:
             alert, attempt = self._retry_queue.popleft()
             if self._do_send(alert):
