@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed (v0.9 Track 2b)
+- mypy ratchet: `check_untyped_defs = true` (was `false`). All
+  untyped function bodies are now type-checked across the
+  codebase. The four modules behind the
+  `[[tool.mypy.overrides]] ignore_errors = true` block (`core`,
+  `menubar_app`, `agent_log_parser`, `fs_watcher`) all lost the
+  override in this PR — the override block itself was removed
+  from `pyproject.toml`:
+    - `fs_watcher`: override removed; 5 mypy errors fixed
+      (`Observer` is a watchdog factory binding, not a class —
+      `_observer` re-typed against `BaseObserver`; `detail` dict
+      annotated `dict[str, object]` so a project_meta dict can
+      coexist with bool flags per ADR 0007 §D3 contract;
+      `sorted(..., key=dict.get)` replaced with a lambda since
+      `dict.get` returns `Optional[V]` which is not sortable).
+    - `menubar_app`: override removed; 3 errors fixed
+      (`Sentinel(config_path=...)` signature corrected to
+      `Optional[str]` to match its actual call sites; two stale
+      `# type: ignore[attr-defined]` comments — left over from
+      when rumps had no stubs — dropped because rumps is now
+      `Any` and the comments were flagged as unused).
+    - `core`: override removed; 13 errors fixed (`DEFAULT_CONFIG`
+      annotated `dict[str, Any]` so `.copy()` and `**unpack`
+      work; three `Foo | None` instance-var annotations rewritten
+      as `Optional[Foo]` because `python_version = "3.9"`
+      rejects PEP 604 in mypy even though the runtime tolerates
+      it inside method bodies; `resolve_config_path` /
+      `load_config` defaults corrected to `Optional[...]` to
+      match the documented "None means use defaults" behavior).
+    - `agent_log_parser`: override removed; 1 error fixed
+      (`events: list[SecurityEvent] = []` annotation in
+      `_check_typosquatting`).
+- The earlier 3-step pre-mypy fixes (`event_logger._current_file:
+  Optional[IO[str]]`, `notifier._retry_queue:
+  deque[tuple[Alert, int]]`) are not behavior changes either —
+  they only narrow types that were previously inferred as `Any`.
+- All 779 pytest tests pass; ruff is clean. No public API or
+  on-disk schema changes; the only signature touched is
+  `Sentinel.__init__(config_path)` and `resolve_config_path` /
+  `load_config`, all three of which always accepted `None` at
+  runtime — the annotations were the bug.
+
 ### Changed (v0.9 Track 2a)
 - Ruff lint ratchet — added rule sets:
   - `B` (bugbear) — surface real bugs (mutable default args,

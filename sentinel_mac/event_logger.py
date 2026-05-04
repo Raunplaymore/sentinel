@@ -13,7 +13,7 @@ import threading
 from datetime import date as _date_cls
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Optional
+from typing import IO, Callable, Optional
 
 from sentinel_mac.models import SecurityEvent
 
@@ -38,7 +38,7 @@ class EventLogger:
         self._events_dir.mkdir(parents=True, exist_ok=True)
         self._retention_days = retention_days or self.DEFAULT_RETENTION_DAYS
         self._current_date: str = ""
-        self._current_file = None
+        self._current_file: Optional[IO[str]] = None
         # Single lock guards both append (rotate + write) and the
         # update_event_by_id rewrite path. ADR 0002 §D3 — small surface,
         # single-daemon assumption.
@@ -49,9 +49,12 @@ class EventLogger:
         today = datetime.now().strftime("%Y-%m-%d")
         line = json.dumps(self._serialize(event), ensure_ascii=False)
         with self._lock:
-            # Rotate file on date change
+            # Rotate file on date change. Initial call (`_current_date == ""`)
+            # also lands here so `_current_file` is guaranteed open afterwards;
+            # the assert narrows Optional[IO[str]] for mypy.
             if today != self._current_date:
                 self._rotate(today)
+            assert self._current_file is not None
             try:
                 self._current_file.write(line + "\n")
                 self._current_file.flush()

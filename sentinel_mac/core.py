@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 # ─────────────────────────────────────────────
 # Config Resolution
@@ -46,7 +46,7 @@ from sentinel_mac.notifier import (  # noqa: F401
     TelegramNotifier,
 )
 
-DEFAULT_CONFIG = {
+DEFAULT_CONFIG: dict[str, Any] = {
     "ntfy_topic": "sentinel-default",
     "ntfy_server": "https://ntfy.sh",
     "notifications_enabled": True,
@@ -66,7 +66,7 @@ DEFAULT_CONFIG = {
 }
 
 
-def resolve_config_path(explicit_path: str = None) -> Path:
+def resolve_config_path(explicit_path: Optional[str] = None) -> Optional[Path]:
     """Find config file in priority order:
     1. Explicit --config path
     2. ./config.yaml (current directory)
@@ -186,7 +186,7 @@ def _apply_env_overrides(config: dict) -> None:
             notif[config_key] = val
 
 
-def load_config(config_path: Path = None) -> dict:
+def load_config(config_path: Optional[Path] = None) -> dict:
     """Load config with error handling and default fallback."""
     defaults = DEFAULT_CONFIG.copy()
     defaults["thresholds"] = DEFAULT_CONFIG["thresholds"].copy()
@@ -250,7 +250,7 @@ class Sentinel:
 
     def __init__(
         self,
-        config_path: str = None,
+        config_path: Optional[str] = None,
         *,
         acquire_lock: bool = True,
         install_signal_handlers: bool = True,
@@ -319,9 +319,9 @@ class Sentinel:
 
         # Security layer — event queue shared between collectors and main loop
         self._security_queue: queue.Queue = queue.Queue(maxsize=1000)
-        self._fs_watcher: FSWatcher | None = None
-        self._net_tracker: NetTracker | None = None
-        self._agent_log_parser: AgentLogParser | None = None
+        self._fs_watcher: Optional[FSWatcher] = None
+        self._net_tracker: Optional[NetTracker] = None
+        self._agent_log_parser: Optional[AgentLogParser] = None
 
         # Host context (ADR 0001) — shared across collectors. Disabled by
         # default; load() is idempotent and a no-op when disabled.

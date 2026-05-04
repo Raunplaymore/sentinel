@@ -81,23 +81,15 @@ ignore = ["E501", "E722", "E741"]
 # 3.9–3.13, so we type-check against the lowest CI Python.
 python_version = "3.9"
 ignore_missing_imports = true
-check_untyped_defs = false
+# v0.9 Track 2b ratchet — was false. All untyped function bodies are now
+# type-checked across the codebase. The previous `[[tool.mypy.overrides]]
+# ignore_errors = true` for `core` / `menubar_app` / `agent_log_parser` /
+# `fs_watcher` was removed in the same ratchet — every module is now
+# checked. Track 2c will flip on `disallow_untyped_defs`.
+check_untyped_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 # `requests` ships its own types since 2.32 but on older installs mypy still
 # flags `import-untyped`; ignore_missing_imports does not suppress it. Drop
 # this when CI baseline pins types-requests.
 disable_error_code = ["import-untyped"]
-# Strict mode is a v0.8 ratchet. Keep this lenient for now.
-
-# Existing collectors / core / menubar_app pre-date type-checking. Track A & B
-# (v0.6) own these files and have parallel PRs in flight, so Track C does not
-# touch them. v0.8 ratchet PR will tighten these.
-[[tool.mypy.overrides]]
-module = [
-    "sentinel_mac.core",
-    "sentinel_mac.menubar_app",
-    "sentinel_mac.collectors.agent_log_parser",
-    "sentinel_mac.collectors.fs_watcher",
-]
-ignore_errors = true

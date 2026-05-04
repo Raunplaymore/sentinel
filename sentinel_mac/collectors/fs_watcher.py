@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Optional
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
+from watchdog.observers.api import BaseObserver
 
 from sentinel_mac.collectors.project_context import ProjectContext
 from sentinel_mac.collectors.system import MacOSCollector
@@ -108,7 +109,9 @@ class FSWatcher:
         sec_config = config.get("security", {}).get("fs_watcher", {})
 
         self._event_queue = event_queue
-        self._observer: Optional[Observer] = None
+        # `Observer` from watchdog is a platform-specific factory binding,
+        # not a class — for typing purposes the public base is `BaseObserver`.
+        self._observer: Optional[BaseObserver] = None
         self._running = False
 
         # ADR 0007 D5 — project context for project_meta enrichment on
@@ -432,7 +435,11 @@ class FSWatcher:
         if joined and not is_sensitive:
             return
 
-        detail = {}
+        # ADR 0007 §D3 — `SecurityEvent.detail` is `dict[str, Any]`; mixing
+        # bool flags with a project_meta dict requires the explicit annotation
+        # so mypy doesn't lock it down to `dict[str, bool]` from the first
+        # assignment.
+        detail: dict[str, object] = {}
         if is_sensitive:
             detail["sensitive"] = True
         if is_executable:
@@ -766,7 +773,9 @@ class FSWatcher:
             )
             dir_counts[key] = dir_counts.get(key, 0) + 1
 
-        return sorted(dir_counts, key=dir_counts.get, reverse=True)
+        # `dict.get` returns Optional[int]; mypy can't prove sortability. The
+        # keys originate from this same dict, so __getitem__ is total here.
+        return sorted(dir_counts, key=lambda k: dir_counts[k], reverse=True)
 
     @staticmethod
     def _guess_project_name(paths: list[str]) -> str:

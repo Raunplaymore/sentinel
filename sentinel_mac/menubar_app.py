@@ -438,7 +438,7 @@ class SentinelApp(rumps.App):
 
     def _make_rule_item(self, rule: dict) -> rumps.MenuItem:
         item = rumps.MenuItem(rule["title"], callback=self._on_toggle_rule)
-        item._sentinel_rule = rule  # type: ignore[attr-defined]
+        item._sentinel_rule = rule
         item.state = 1 if _get_nested(
             self._config, rule["config_path"], rule["default"]
         ) else 0
@@ -632,7 +632,7 @@ class SentinelApp(rumps.App):
         label = f"{emoji} {ts.strftime('%H:%M:%S')}  {alert.title}"
         item = rumps.MenuItem(label, callback=self._on_alert_clicked)
         # Stash so the click handler can recover the full alert.
-        item._sentinel_alert = (ts, alert)  # type: ignore[attr-defined]
+        item._sentinel_alert = (ts, alert)
         return item
 
     def _on_alert_clicked(self, sender) -> None:
