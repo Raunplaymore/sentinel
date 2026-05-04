@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Optional
+from typing import IO, Any, Iterator, Optional
 
 # ─────────────────────────────────────────────
 # Config Resolution
@@ -224,7 +224,7 @@ def daemon_lock_path() -> Path:
     return lock_dir / "sentinel.lock"
 
 
-def try_acquire_daemon_lock():
+def try_acquire_daemon_lock() -> Optional[IO[str]]:
     """Try to grab the exclusive daemon flock.
 
     Returns the open file handle on success (caller must keep the reference
@@ -262,7 +262,7 @@ class Sentinel:
         instead of having Sentinel grab them via sys.exit / signal handlers.
         """
         # Prevent duplicate instances via PID file lock
-        self._pid_file = None
+        self._pid_file: Optional[IO[str]] = None
         self._data_dir = resolve_data_dir()
         self._data_dir.mkdir(parents=True, exist_ok=True)
         if acquire_lock:
@@ -413,7 +413,7 @@ class Sentinel:
         """
         self._shutdown(None, None)
 
-    def _acquire_lock(self):
+    def _acquire_lock(self) -> None:
         """Acquire the global daemon lock; print + sys.exit on contention."""
         fp = try_acquire_daemon_lock()
         if fp is None:
@@ -422,7 +422,7 @@ class Sentinel:
             sys.exit(1)
         self._pid_file = fp
 
-    def adopt_lock(self, fp) -> None:
+    def adopt_lock(self, fp: IO[str]) -> None:
         """Install a lock handle acquired externally (by the menubar app).
 
         Used in embedded mode where the menubar tries to grab the daemon lock
@@ -431,7 +431,7 @@ class Sentinel:
         """
         self._pid_file = fp
 
-    def _shutdown(self, signum, frame):
+    def _shutdown(self, signum: Optional[int], frame: Any) -> None:
         logging.info("\U0001f6d1 Sentinel shutting down...")
         self._running = False
         # Wake the reload worker so it can observe `_shutdown_event` and
@@ -457,7 +457,7 @@ class Sentinel:
 
     # ── ADR 0005 — daemon reload protocol ───────────────────────────
 
-    def _on_sighup(self, signum, frame):
+    def _on_sighup(self, signum: int, frame: Any) -> None:
         """async-signal-safe: just set the flag.
 
         Heavy lifting (config parse, validation, swap) happens in the
@@ -467,7 +467,7 @@ class Sentinel:
         """
         self._reload_requested.set()
 
-    def _reload_worker_loop(self):
+    def _reload_worker_loop(self) -> None:
         """ADR 0005 D5 — wait on `_reload_requested`, run `_do_reload`, repeat.
 
         Coalescing: the event is `clear()`ed before `_do_reload` runs, so a
@@ -728,7 +728,7 @@ class Sentinel:
                 self._security_rules,
             )
 
-    def run(self):
+    def run(self) -> None:
         channels = self.notifier.channel_names
         logging.info(f"\U0001f680 Sentinel started — channels: {', '.join(channels)}")
         logging.info(f"   Check interval: {self.interval}s")
@@ -802,7 +802,7 @@ class Sentinel:
 
         logging.info("Sentinel stopped.")
 
-    def _process_security_events(self):
+    def _process_security_events(self) -> None:
         """Drain the security event queue, log to JSONL, and generate alerts.
 
         ADR 0005 §D5 — the drainer takes its own snapshot of reload-managed
@@ -958,7 +958,9 @@ def _parse_csv_set(
 # ─────────────────────────────────────────────
 
 
-def _iter_event_lines(events_dir: Path, start_dt: datetime, end_dt: datetime):
+def _iter_event_lines(
+    events_dir: Path, start_dt: datetime, end_dt: datetime
+) -> Iterator[tuple[Path, str]]:
     """Yield (filepath, raw_line) for events in the dated JSONL range.
 
     Streams line-by-line — never holds the full file in memory. Files outside
@@ -1253,7 +1255,7 @@ def _hook_has_sentinel(hook_entry: dict) -> bool:
     )
 
 
-def _hooks_control(subcommand: str):
+def _hooks_control(subcommand: str) -> None:
     """Manage Claude Code PreToolUse hooks for Sentinel."""
     if subcommand == "status":
         settings, err = _load_claude_settings()
@@ -1328,7 +1330,7 @@ def _hooks_control(subcommand: str):
     print("Usage: sentinel hooks install | uninstall | status")
 
 
-def _hook_check():
+def _hook_check() -> None:
     """Called by Claude Code PreToolUse hook. Reads JSON from stdin, exits 0 (allow) or 2 (block)."""
     from sentinel_mac.collectors.agent_log_parser import HIGH_RISK_PATTERNS
     from sentinel_mac.collectors.typosquatting import (
@@ -1501,7 +1503,7 @@ def _version_hook_line() -> str:
     return "not installed (run: sentinel hooks install)"
 
 
-def _service_control(command: str):
+def _service_control(command: str) -> None:
     """Control the Sentinel launchd service."""
     if command == "status":
         try:
@@ -1574,7 +1576,7 @@ def _service_control(command: str):
         print("Sentinel restarted")
 
 
-def main():
+def main() -> None:
     import argparse
 
     # v0.9 Track 3b — `__version__` is no longer needed at this scope.

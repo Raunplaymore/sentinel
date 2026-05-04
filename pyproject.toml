@@ -85,8 +85,12 @@ ignore_missing_imports = true
 # type-checked across the codebase. The previous `[[tool.mypy.overrides]]
 # ignore_errors = true` for `core` / `menubar_app` / `agent_log_parser` /
 # `fs_watcher` was removed in the same ratchet — every module is now
-# checked. Track 2c will flip on `disallow_untyped_defs`.
+# checked.
 check_untyped_defs = true
+# v0.9 Track 2c ratchet — every public/private `def` in `sentinel_mac/`
+# now carries parameter and return-type annotations. Future code that
+# adds an unannotated function will fail mypy.
+disallow_untyped_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 # `requests` ships its own types since 2.32 but on older installs mypy still

@@ -34,7 +34,7 @@ class MacOSCollector:
         "node", "python", "python3", "code", "cursor", "docker",
     }
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._prev_net = psutil.net_io_counters()
         self._prev_net_time = time.time()
 

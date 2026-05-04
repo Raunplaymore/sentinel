@@ -902,7 +902,7 @@ def _emit_cleanup_envelope(
     _emit_json_envelope(kind="backup_cleanup", data=data)
 
 
-def _cmd_cleanup_backups(args) -> int:
+def _cmd_cleanup_backups(args: argparse.Namespace) -> int:
     """ADR 0009 — ``sentinel doctor --cleanup-backups``.
 
     Returns exit code per ADR D7:
