@@ -107,14 +107,24 @@ class TestUpdateCommand:
             exit_code = dispatch([])
             assert exit_code == 3
 
-    def test_apply_not_implemented(self) -> None:
-        """Should return 1 with placeholder message when --apply is used."""
+    def test_apply_editable_early_exit(self) -> None:
+        """Should return 3 for --apply in editable install."""
+        from pathlib import Path
+
+        from sentinel_mac.updater.detect import InstallMethod
+
         with patch(
-            "sentinel_mac.updater.version.get_running_version",
+            "sentinel_mac.commands.update.detect_install_method",
+            return_value=InstallMethod.EDITABLE,
+        ), patch(
+            "sentinel_mac.commands.update.get_source_root",
+            return_value=Path("/tmp/source"),
+        ), patch(
+            "sentinel_mac.commands.update.get_running_version",
             return_value="0.9.0",
         ):
             exit_code = dispatch(["--apply"])
-            assert exit_code == 1
+            assert exit_code == 3
 
     def test_default_is_check(self) -> None:
         """Should default to --check when no flag is given."""
