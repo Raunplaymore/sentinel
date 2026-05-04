@@ -37,7 +37,7 @@ class NotificationChannel(Protocol):
 class MacOSNotifier:
     """macOS native notifications via terminal-notifier (preferred) or osascript (fallback)."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._use_terminal_notifier = shutil.which("terminal-notifier") is not None
 
     @property
@@ -237,7 +237,7 @@ class NotificationManager:
         self._channels: list = []
         self._setup_channels(config)
 
-    def _setup_channels(self, config: dict):
+    def _setup_channels(self, config: dict) -> None:
         """Auto-detect enabled channels from config values."""
         notif = config.get("notifications", {})
 
@@ -267,7 +267,7 @@ class NotificationManager:
     def channel_names(self) -> list[str]:
         return [ch.name for ch in self._channels]
 
-    def send(self, alert: Alert):
+    def send(self, alert: Alert) -> None:
         """Send alert to all channels IF it's critical. Otherwise log only."""
         if alert.level != "critical":
             logging.info(f"[{alert.level}] {alert.title} — logged only")
@@ -279,7 +279,7 @@ class NotificationManager:
             except Exception as e:
                 logging.error(f"[{channel.name}] Channel error: {e}")
 
-    def send_status(self, m: SystemMetrics):
+    def send_status(self, m: SystemMetrics) -> None:
         """Send periodic status report. Status is always sent (operational heartbeat)."""
         cpu_temp = f" | {m.cpu_temp}°C" if m.cpu_temp else ""
         lines = [

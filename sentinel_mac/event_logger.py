@@ -13,7 +13,7 @@ import threading
 from datetime import date as _date_cls
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import IO, Callable, Optional
+from typing import IO, Callable, Optional, Union
 
 from sentinel_mac.models import SecurityEvent
 
@@ -33,7 +33,7 @@ class EventLogger:
 
     DEFAULT_RETENTION_DAYS = 90
 
-    def __init__(self, data_dir, retention_days=None):
+    def __init__(self, data_dir: Union[str, Path], retention_days: Optional[int] = None) -> None:
         self._events_dir = Path(data_dir) / "events"
         self._events_dir.mkdir(parents=True, exist_ok=True)
         self._retention_days = retention_days or self.DEFAULT_RETENTION_DAYS

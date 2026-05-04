@@ -810,7 +810,7 @@ class AgentLogParser:
         with self._last_message_lock:
             return self._last_message_ts
 
-    def start(self):
+    def start(self) -> None:
         """Start the log parser in a background thread."""
         if self._running:
             return
@@ -846,7 +846,7 @@ class AgentLogParser:
         self._thread.start()
         logger.info("AgentLogParser: started")
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop the parser thread."""
         if self._running:
             self._running = False
@@ -854,7 +854,7 @@ class AgentLogParser:
                 self._thread.join(timeout=5)
             logger.info("AgentLogParser: stopped")
 
-    def _run_loop(self):
+    def _run_loop(self) -> None:
         """Main loop: find new log entries every few seconds."""
         while self._running:
             try:
@@ -871,7 +871,7 @@ class AgentLogParser:
 
             time.sleep(3)  # Poll every 3 seconds
 
-    def _scan_claude_code_logs(self, base_dir: str):
+    def _scan_claude_code_logs(self, base_dir: str) -> None:
         """Scan Claude Code JSONL session logs for new entries."""
         if not os.path.isdir(base_dir):
             return
@@ -886,7 +886,7 @@ class AgentLogParser:
                 continue
             self._tail_jsonl(log_file, "claude_code")
 
-    def _tail_jsonl(self, file_path: str, agent_type: str):
+    def _tail_jsonl(self, file_path: str, agent_type: str) -> None:
         """Read new lines from a JSONL file since last position."""
         try:
             file_size = os.path.getsize(file_path)
@@ -929,7 +929,7 @@ class AgentLogParser:
         except OSError as e:
             logger.debug(f"AgentLogParser: cannot read {file_path}: {e}")
 
-    def _process_claude_code_entry(self, entry: dict):
+    def _process_claude_code_entry(self, entry: dict) -> None:
         """Process a single Claude Code JSONL entry."""
         entry_type = entry.get("type", "")
 
@@ -989,7 +989,7 @@ class AgentLogParser:
             self._evaluate_tool_call(tool_name, tool_input, timestamp, entry)
 
     def _evaluate_tool_call(self, tool_name: str, tool_input: dict,
-                            timestamp: datetime, entry: dict):
+                            timestamp: datetime, entry: dict) -> None:
         """Check a tool call for security-relevant patterns."""
         events = []
 
@@ -1272,7 +1272,7 @@ class AgentLogParser:
 
     def _handle_mcp_tool_call(self, tool_name: str, tool_input: dict,
                               timestamp: datetime,
-                              entry: Optional[dict] = None):
+                              entry: Optional[dict] = None) -> None:
         """Log MCP tool calls as informational events."""
         # Parse mcp__serverName__toolName
         parts = tool_name.split("__")
@@ -1431,7 +1431,7 @@ class AgentLogParser:
         cwd = entry.get("cwd") if isinstance(entry, dict) else None
         return cwd if isinstance(cwd, str) and cwd else None
 
-    def _check_mcp_tool_result(self, entry: dict):
+    def _check_mcp_tool_result(self, entry: dict) -> None:
         """Check MCP tool_result responses for prompt injection patterns."""
         timestamp_str = entry.get("timestamp", "")
         try:
@@ -1492,7 +1492,7 @@ class AgentLogParser:
                     logger.warning("AgentLogParser: event queue full, dropping injection event")
                 break  # One match is enough
 
-    def _scan_cursor_logs(self, base_dir: str):
+    def _scan_cursor_logs(self, base_dir: str) -> None:
         """Scan Cursor workspace storage for AI conversation logs."""
         if not os.path.isdir(base_dir):
             return
@@ -1512,7 +1512,7 @@ class AgentLogParser:
                         continue
                     self._tail_jsonl(file_str, "cursor")
 
-    def parse_line(self, line: str):
+    def parse_line(self, line: str) -> None:
         """Parse a single JSONL line. Public method for testing."""
         try:
             entry = json.loads(line)

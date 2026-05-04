@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed (v0.9 Track 2c)
+- mypy ratchet: `disallow_untyped_defs = true`. Every `def` in
+  `sentinel_mac/` now carries parameter and return-type
+  annotations; future PRs that add an unannotated function will
+  fail mypy. 48 missing annotations were added across 9 files
+  (`core.py`, `menubar_app.py`, `collectors/agent_log_parser.py`,
+  `collectors/fs_watcher.py`, `notifier.py`, `event_logger.py`,
+  `commands/doctor.py`, `collectors/system.py`,
+  `collectors/net_tracker.py`).
+- The Track 2 ratchet sequence (Track 2a ruff `B`/`UP`/`SIM`,
+  Track 2b `check_untyped_defs`, Track 2c `disallow_untyped_defs`)
+  is now complete.
+- `EventLogger.__init__(data_dir)` is now annotated
+  `Union[str, Path]` to match the test fixtures that pass
+  `tempfile.mkdtemp()` strings — runtime accepted both before, the
+  signature was the lie.
+- `Sentinel._pid_file` is annotated `Optional[IO[str]]` so the
+  flock handle adoption path (`adopt_lock`, `_acquire_lock`) is
+  type-safe end-to-end.
+- All rumps callbacks (`_on_quit`, `_on_tick`, `_on_toggle_rule`,
+  …) take `sender: Any` because rumps ships no type stubs and the
+  runtime accepts the same untyped object the caller passes
+  through `callback=`.
+
 ### Changed (v0.9 Track 2b)
 - mypy ratchet: `check_untyped_defs = true` (was `false`). All
   untyped function bodies are now type-checked across the

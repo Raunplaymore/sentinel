@@ -79,7 +79,7 @@ class NetTracker:
         # Reverse DNS cache: ip -> hostname
         self._dns_cache: dict[str, str] = {}
 
-    def poll(self):
+    def poll(self) -> None:
         """Scan current network connections and emit events for AI processes.
 
         Called from the main daemon loop each check interval.

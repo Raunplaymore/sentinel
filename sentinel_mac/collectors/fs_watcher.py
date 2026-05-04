@@ -78,7 +78,7 @@ class _SentinelEventHandler(FileSystemEventHandler):
         super().__init__()
         self._watcher = watcher
 
-    def on_any_event(self, event: FileSystemEvent):
+    def on_any_event(self, event: FileSystemEvent) -> None:
         if event.is_directory:
             return
         event_type = _EVENT_TYPE_MAP.get(event.event_type)
@@ -271,7 +271,7 @@ class FSWatcher:
             return None
         return entry
 
-    def start(self):
+    def start(self) -> None:
         """Start watching in a background thread."""
         if self._running:
             return
@@ -307,7 +307,7 @@ class FSWatcher:
         self._start_pending_sweeper()
         logger.info(f"FSWatcher: started ({len(valid_paths)} paths)")
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop the observer."""
         if self._observer and self._running:
             self._running = False
@@ -385,7 +385,7 @@ class FSWatcher:
                 self._pending_downloads.pop(p, None)
             return len(expired)
 
-    def _handle_fs_event(self, path: str, event_type: str):
+    def _handle_fs_event(self, path: str, event_type: str) -> None:
         """Process a raw file system event."""
         # Ignore filtered patterns
         if self._should_ignore(path):
@@ -657,7 +657,7 @@ class FSWatcher:
         except (subprocess.TimeoutExpired, OSError):
             return ""
 
-    def _track_bulk(self, path: str, event_type: str):
+    def _track_bulk(self, path: str, event_type: str) -> None:
         """Track recent events for bulk change detection."""
         now = time.time()
         with self._bulk_lock:

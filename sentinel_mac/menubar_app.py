@@ -390,7 +390,7 @@ class SentinelApp(rumps.App):
         if self._daemon_thread is not None and self._daemon_thread.is_alive():
             self._daemon_thread.join(timeout=5)
 
-    def _on_quit(self, _sender) -> None:
+    def _on_quit(self, _sender: Any) -> None:
         self._stop_embedded_daemon()
         rumps.quit_application()
 
@@ -446,24 +446,24 @@ class SentinelApp(rumps.App):
         return item
 
     @rumps.timer(POLL_SECONDS)
-    def _on_tick(self, _sender) -> None:
+    def _on_tick(self, _sender: Any) -> None:
         if self._paused:
             return
         self._refresh()
 
-    def _on_scan_now(self, _sender) -> None:
+    def _on_scan_now(self, _sender: Any) -> None:
         self._refresh()
 
-    def _on_toggle_pause(self, sender) -> None:
+    def _on_toggle_pause(self, sender: Any) -> None:
         self._paused = not self._paused
         sender.title = "Resume monitoring" if self._paused else "Pause monitoring"
         if self._paused:
             self.title = "🛡 ⏸"
 
-    def _on_open_all_log(self, _sender) -> None:
+    def _on_open_all_log(self, _sender: Any) -> None:
         self._open_log_view(min_level=None, suffix="all", label="all levels")
 
-    def _on_open_warning_log(self, _sender) -> None:
+    def _on_open_warning_log(self, _sender: Any) -> None:
         self._open_log_view(
             min_level="WARNING", suffix="warnings", label="WARNING+ only (alerts)"
         )
@@ -501,7 +501,7 @@ class SentinelApp(rumps.App):
         out.write_text(header + body)
         subprocess.Popen(["open", str(out)])
 
-    def _on_toggle_rule(self, sender) -> None:
+    def _on_toggle_rule(self, sender: Any) -> None:
         rule = getattr(sender, "_sentinel_rule", None)
         if not rule:
             return
@@ -535,7 +535,7 @@ class SentinelApp(rumps.App):
                 "~/Library/LaunchAgents/com.sentinel.agent.plist",
             )
 
-    def _on_about_rules(self, _sender) -> None:
+    def _on_about_rules(self, _sender: Any) -> None:
         lines = ["Sentinel watches the following AI behaviors:", ""]
         for r in DETECTION_RULES:
             lines.append(f"• {r['title']}")
@@ -546,7 +546,7 @@ class SentinelApp(rumps.App):
             lines.append(f"  • {r['title']}: {r['description']}")
         rumps.alert("Sentinel — Detection Rules", "\n".join(lines))
 
-    def _on_open_config(self, _sender) -> None:
+    def _on_open_config(self, _sender: Any) -> None:
         if self._config_path and self._config_path.exists():
             subprocess.Popen(["open", str(self._config_path)])
         else:
@@ -635,14 +635,14 @@ class SentinelApp(rumps.App):
         item._sentinel_alert = (ts, alert)
         return item
 
-    def _on_alert_clicked(self, sender) -> None:
+    def _on_alert_clicked(self, sender: Any) -> None:
         payload = getattr(sender, "_sentinel_alert", None)
         if payload is None:
             return
         ts, alert = payload
         self._show_alert_detail(ts, alert)
 
-    def _on_summary_clicked(self, _sender) -> None:
+    def _on_summary_clicked(self, _sender: Any) -> None:
         if not self._alert_history:
             return
         ts, alert = self._alert_history[0]
