@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-05-05
+
+Critical bug fix. **All v0.10.x users running `sentinel update` should
+upgrade.**
+
+### Fixed
+- **Missing `packaging` runtime dependency** — v0.10 Track A added
+  `from packaging.version import Version` to `updater/version.py`
+  for PEP 440 version comparison, but `packaging` was not added to
+  `[project] dependencies`. PyPI installs (pipx / pip-venv) created
+  via `pipx install sentinel-mac` got a minimal venv that does not
+  include `packaging` transitively. As a result, **every call to
+  `sentinel update --check` or `--apply` from a clean PyPI install
+  raised `ModuleNotFoundError: No module named 'packaging'`** and
+  exited 1 — the self-update feature was effectively broken for the
+  exact users it was built for.
+- The bug was masked during development because dev environments
+  (editable install + `pip install -e .`) get `packaging` from
+  setuptools/pip transitively.
+
+### Changed
+- `pyproject.toml` `dependencies` now lists `packaging>=21,<26`.
+  Added a regression test (`tests/test_dependencies.py`) that
+  imports `packaging` from a clean process to fail-fast on this
+  shape of bug in the future.
+
 ## [0.10.2] - 2026-05-05
 
 Patch release. Single-purpose perf fix carried over from v0.9 Track 1
