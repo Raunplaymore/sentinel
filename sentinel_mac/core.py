@@ -1637,6 +1637,11 @@ def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] == "update":
         from sentinel_mac.commands.update import dispatch as _update_dispatch
         sys.exit(_update_dispatch(sys.argv[2:]))
+    # ADR 0011 Track A — `sentinel install` first-install command. Same dispatch
+    # shape; owns its own argparse subparser inside commands/install.py.
+    if len(sys.argv) >= 2 and sys.argv[1] == "install":
+        from sentinel_mac.commands.install import dispatch as _install_dispatch
+        sys.exit(_install_dispatch(sys.argv[2:]))
 
     parser = argparse.ArgumentParser(
         description="Sentinel — AI Agent Security Guardian for macOS",
