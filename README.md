@@ -43,25 +43,52 @@ It runs as a background daemon, monitoring both system health and AI agent behav
 
 ## Quick Start
 
-Three install paths — pick whichever fits your workflow. All three end with the same `sentinel` CLI on your `PATH`.
+The fastest path is two commands:
 
-### Option 1 — Recommended: pipx (single-machine, isolated venv)
+```bash
+pipx install sentinel-mac
+sentinel install
+```
+
+`sentinel install` (v0.11+) creates the config, generates the LaunchAgent plist, starts the daemon, and verifies everything in one shot. Run `sentinel uninstall` to undo.
+
+### Option 1 — Recommended: pipx + sentinel install
 
 `pipx` installs the published wheel into its own venv and exposes the `sentinel` binary globally. No repo clone, no manual venv plumbing.
 
 ```bash
 pipx install sentinel-mac
-sentinel --init-config
-sentinel start
+sentinel install           # config + LaunchAgent + start + verify (v0.11+)
 ```
 
-Trade-off: you do not get the `install.sh` launchd auto-start step — see "Auto-start on login" below if you want the daemon to come up at boot.
+The daemon auto-starts on login via the LaunchAgent plist. To uninstall, run:
 
-### Option 2 — git clone + install.sh (scripted setup with launchd auto-start)
+```bash
+sentinel uninstall         # removes plist, preserves config and history
+sentinel uninstall --purge # also deletes config and all event history
+pipx uninstall sentinel-mac
+```
 
-> Recommended when you want the launchd plist set up automatically
-> or you're doing source-tree development. For most users, Option 1
-> (pipx) is simpler.
+### Option 2 — pip install (manual setup)
+
+Use this when you already manage your own venvs and prefer direct control:
+
+```bash
+python3 -m venv ~/.sentinel-venv
+~/.sentinel-venv/bin/pip install sentinel-mac
+~/.sentinel-venv/bin/sentinel install  # create config and register LaunchAgent
+```
+
+Or skip the daemon entirely and run in foreground:
+
+```bash
+~/.sentinel-venv/bin/sentinel --once   # One-shot system snapshot
+~/.sentinel-venv/bin/sentinel --report # Today's event summary
+```
+
+### Option 3 — git clone + install.sh (development only)
+
+For source-tree development only. Operational users should use Option 1.
 
 ```bash
 git clone https://github.com/raunplaymore/sentinel.git
@@ -69,55 +96,7 @@ cd sentinel
 bash install.sh            # venv + deps + launchd (auto-starts on login)
 ```
 
-This creates an isolated venv, installs all dependencies, registers a launchd service (auto-start on login), and adds a `sentinel` alias to your shell. Best when you want to read/modify the source or contribute back. After restarting your terminal:
-
-```bash
-sentinel start             # Start background service
-sentinel stop              # Stop background service
-sentinel status            # Check if running
-sentinel --once            # One-shot system snapshot
-sentinel --report          # Today's event summary
-sentinel --report 7        # Last 7 days
-sentinel logs              # Tail live logs
-sentinel --help            # All options
-```
-
-### Option 3 — pip install (minimal, manual launchd plist)
-
-```bash
-python3 -m venv ~/.sentinel-venv
-~/.sentinel-venv/bin/pip install sentinel-mac
-~/.sentinel-venv/bin/sentinel --init-config
-~/.sentinel-venv/bin/sentinel              # Run in foreground
-```
-
-Use this when you already manage your own venvs and prefer the smallest install. Auto-start on login then needs a hand-written LaunchAgent plist:
-
-```bash
-# Create the LaunchAgent plist
-cat > ~/Library/LaunchAgents/com.sentinel.agent.plist << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.sentinel.agent</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$HOME/.sentinel-venv/bin/sentinel</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-</dict>
-</plist>
-EOF
-
-# Start the service
-launchctl load ~/Library/LaunchAgents/com.sentinel.agent.plist
-```
+This creates an isolated venv, installs all dependencies, registers a launchd service, and adds a `sentinel` alias to your shell. Best when you want to read/modify the source or contribute back.
 
 **That's it.** macOS native notifications are enabled by default — no phone app needed.
 

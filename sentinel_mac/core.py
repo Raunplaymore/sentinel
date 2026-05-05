@@ -1642,6 +1642,11 @@ def main() -> None:
     if len(sys.argv) >= 2 and sys.argv[1] == "install":
         from sentinel_mac.commands.install import dispatch as _install_dispatch
         sys.exit(_install_dispatch(sys.argv[2:]))
+    # ADR 0011 Track B — `sentinel uninstall` teardown command. Same dispatch
+    # shape; owns its own argparse subparser inside commands/uninstall.py.
+    if len(sys.argv) >= 2 and sys.argv[1] == "uninstall":
+        from sentinel_mac.commands.uninstall import dispatch as _uninstall_dispatch
+        sys.exit(_uninstall_dispatch(sys.argv[2:]))
 
     parser = argparse.ArgumentParser(
         description="Sentinel — AI Agent Security Guardian for macOS",
