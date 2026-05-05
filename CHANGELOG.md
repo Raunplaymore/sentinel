@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-05-05
+
+The "self-update" release. Single-theme cycle, single ADR (0010 —
+Self-Update). Closes the UX gap noted by users with the menu bar app:
+prior to this version, updating required four terminal commands
+(`launchctl unload` → `pip install -U` → `launchctl load` → verify);
+now it is one CLI command or one menu click. 779 tests → 877 (+98).
+
+### Highlights for users
+
+- **`sentinel update` CLI** — one command replaces the four-step
+  manual upgrade dance. `--check` queries PyPI for the latest
+  version (on-demand only — the daemon never polls autonomously,
+  preserving the "nothing leaves the machine without user action"
+  invariant from ADR 0001~0007). `--apply` runs the full sequence:
+  exclusive lock → stop daemon → install (pipx or pip-venv) →
+  restart daemon → verify. Best-effort rollback on upgrade failure.
+- **Menu bar "Check for Updates…"** — new menu item just above
+  Quit. Click → background `--check`. If a new version is found, a
+  modal dialog offers "Update Now" / "Skip This Version" / "Cancel".
+  "Update Now" runs `--apply --yes` and notifies on success or
+  failure. "Skip This Version" records the version in
+  `<data_dir>/updater/skipped_versions.txt` so it does not prompt
+  again. The menu bar icon does **not** gain an update badge —
+  that visual remains reserved for active security alerts.
+- **Install-method auto-detection** — distinguishes pipx, pip-venv,
+  Homebrew, editable/source, and system-Python installs by pure
+  path heuristics on `sys.executable` and `sentinel_mac.__file__`
+  (no subprocess to `pip show`). Each method routes to the right
+  upgrade command; editable installs and system-Python configs
+  early-exit with manual guidance instead of risking a broken
+  state.
+- **Skipped versions** — versions chosen via "Skip This Version"
+  persist between sessions in `<data_dir>/updater/skipped_versions.txt`
+  (one version per line, sorted on write). Future `--check`
+  invocations from the menu bar respect the list silently.
+- **Menu bar app self-update note** — when the menu bar app
+  initiates an upgrade, the daemon is restarted automatically but
+  the menu bar process itself stays on the old code; the success
+  notification asks the user to "Quit and relaunch the menu bar
+  app to load the new code." Auto-relaunch is deferred to v0.11
+  (rumps lifecycle complications).
+
+### Known limitations
+
+- Homebrew install method is detected but `--apply` exits with
+  manual guidance (`brew upgrade sentinel-mac`); the formula does
+  not exist yet. Real Homebrew upgrade lands in v0.11+ once a
+  formula is published.
+- `pip` is not atomic — a network cut mid-install can leave a
+  partial upgrade. Best-effort rollback (re-pin to old version)
+  mitigates but cannot fully eliminate; the failure path prints
+  manual recovery commands.
+- The menu bar process must be quit and relaunched manually after
+  a successful update; auto-relaunch is a v0.11 candidate.
+
 ### Added (v0.10 ADR 0010 Track C)
 
 - **Menu bar "Check for Updates…" item** — new menu item positioned before Quit. Clicking spawns a background thread to run `sentinel update --check --json` without blocking the UI.
