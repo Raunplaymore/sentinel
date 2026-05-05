@@ -7,16 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-05-05
+
+Patch release. Single-purpose perf fix carried over from v0.9 Track 1
+deferred work.
+
 ### Performance
 - **`FSWatcher._identify_actor` lsof cache fixed** — the prior cache
   was functionally a no-op: it only stored positive results (paths
   with a known holder) under a single global timestamp, so the most
   common case (fs events on freshly-created files with no holder)
   paid the macOS `lsof` cost on every call (~290ms each, measured).
-  v0.11 fix: per-path TTL with LRU eviction, both positive and
-  negative results cached, TTL bumped from 2s to 30s (lsof on macOS
-  is too slow for a 10-path rotation to complete inside 2s). Speedup
-  on the three measured burst patterns:
+  Fix: per-path TTL with LRU eviction, both positive and negative
+  results cached, TTL bumped from 2s to 30s (lsof on macOS is too
+  slow for a 10-path rotation to complete inside 2s). Speedup on the
+  three measured burst patterns:
     - `repeat` (1 path × 100): 33.9s → 0.28s — **121×**
     - `mixed`  (10 paths × 10): 36.0s → 2.9s — **12.5×**
     - `unique` (100 unique): 33.6s → 29.6s — 1.13× (bound by
