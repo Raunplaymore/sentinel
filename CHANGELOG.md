@@ -7,18 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.11.0] - TBD
+## [0.11.0] - 2026-05-06
 
-v0.11 ships the first-install and uninstall workflows frozen in ADR 0011. Track A (`sentinel install`) merged first; Track B+C complete the symmetric teardown and documentation reorder for a cohesive onboarding experience.
+The "first install" release. Closes the symmetric counterpart to
+v0.10's self-update — direct response to the user signal "이번
+업그레이드 경험은 매우 간단했어. 그런데 첫 설치 경험은 너무 복잡하고
+어려웠어." Single-theme cycle, single ADR (0011 — First-Install Flow).
+907 → 975 tests (+68).
+
+### Highlights for users
+
+- **`sentinel install` — one-shot first install**. Prior to this
+  version, a fresh PyPI install required four manual steps
+  (`sentinel --init-config` → write a LaunchAgent plist by hand →
+  `launchctl load` → `sentinel doctor` to verify). v0.11 collapses
+  all four into a single command:
+
+  ```bash
+  pipx install sentinel-mac
+  sentinel install
+  ```
+
+  Behind the scenes: detect install method (PIPX / pip-venv) →
+  ensure config exists → create data dir → render LaunchAgent plist
+  with the correct binary path → `launchctl load` → verify daemon
+  via `launchctl list` + `sentinel --version` subprocess + run
+  `sentinel doctor` for a final health check. Idempotent (re-running
+  shows "already installed"); rolls back on any step failure;
+  detects existing dev `install.sh` deployments and refuses to
+  silently overwrite them without `--force`.
+- **`sentinel uninstall` — symmetric teardown.** Default mode stops
+  the daemon and removes the LaunchAgent plist while preserving
+  config and event history. `--purge` additionally deletes config
+  and all events with a strong "**THIS WILL DELETE YOUR EVENT
+  LOG**" confirmation. Non-TTY invocation auto-cancels with a
+  `WARNING` so cron / CI never accidentally wipe data.
+- **EDITABLE / SYSTEM_UNSAFE / Homebrew installs are explicitly
+  rejected** (exit 3 + manual guidance). `sentinel install` is for
+  operational PyPI deployments; dev workflows continue to use
+  `install.sh`. Homebrew support lands in v0.12+ once a formula is
+  published.
+- **Quick Start reordered**: `pipx install sentinel-mac && sentinel
+  install` is now Option 1 (Recommended). `install.sh` moved to
+  Option 3 (source-tree development only) — it remains supported
+  for contributors but the README and the script's own header
+  point most users at the new path.
+
+### Added (v0.11 ADR 0011 Track A — `sentinel install`)
+- New `sentinel install [--force | --no-launchagent | --yes | --json]`
+  command. Exit codes: 0 (success), 1 (error), 2 (already
+  installed), 3 (unsupported install method). 7-step sequence
+  enforced (D2): detect → config → data dir → plist → launchctl
+  load → verify → banner. Per-step rollback so a failed install
+  does not leave half-applied state.
+- New `sentinel_mac/installer/` package: `plist.py` (pure XML
+  rendering + parsing for D5 dev-conflict detection), `config_init.py`
+  (template-driven config bootstrap via `importlib.resources`),
+  `verify.py` (`launchctl list` + version-subprocess + doctor-subprocess
+  health verification — same `subprocess` pattern as ADR 0010 §D3
+  `verify_running_version` for consistency).
+- `sentinel_mac/config.example.yaml` is now bundled in the wheel
+  (declared in `[tool.setuptools.package-data]`) so a clean PyPI
+  install has the template available without a separate `pip
+  download`.
+- ADR 0004 §D2 envelope `kind="install"` / `kind="install_error"`
+  for `--json` output.
 
 ### Added (v0.11 ADR 0011 Track B — `sentinel uninstall`)
-- `sentinel uninstall` — symmetric teardown of `sentinel install`. Default mode stops the daemon and removes the LaunchAgent plist; config and event history are preserved. Use `--purge` to also delete config and all events. Follows ADR 0009 non-TTY/confirmation patterns and ADR 0004 JSON envelope structure (`kind="uninstall"` / `kind="uninstall_error"`). Exit codes: 0 success, 1 error, 2 not installed. Resolves the "how do I fully uninstall" gap identified in v0.9–v0.10 user feedback.
-- ADR 0011 Status: Proposed → **Accepted** — Track A + B merge closes the contract and freezes all CLI surfaces, exit codes, and JSON envelopes.
+- New `sentinel uninstall [--purge | --keep-launchagent | --yes | --json]`
+  command. Exit codes: 0 (success), 1 (error), 2 (not installed).
+  Standard mode: `launchctl bootout` (modern) → `unload` fallback,
+  remove plist, preserve config + events. `--purge` mode:
+  additionally remove config + `events/*.jsonl` +
+  `updater/skipped_versions.txt`. Data directory itself is NOT
+  removed (user may store unrelated files there).
+- New `sentinel_mac/installer/uninstall.py` helpers covering
+  bootout/unload fallback, plist deletion, purge target enumeration,
+  and batch removal with separated error reporting.
+- ADR 0004 §D2 envelope `kind="uninstall"` / `kind="uninstall_error"`.
+- ADR 0011 Status: Proposed → **Accepted** — Track A + B together
+  freeze the install/uninstall contract.
 
 ### Changed (v0.11 ADR 0011 Track C — Documentation reorder)
-- **README Quick Start restructure**: `pipx install sentinel-mac && sentinel install` is now Option 1 (Recommended). Old Option 2 (`install.sh`) moved to Option 3 (development only). Old Option 3 (manual pip) compressed to Option 2 (for users with existing venv tooling).
-- **install.sh header updated**: now clearly marked "for SOURCE-TREE DEVELOPMENT only" with direct guidance to use `pipx install + sentinel install` for operational deployments. Enables dev contributors to find the script easily while guiding most users toward the standard path.
-- `CHANGELOG.md` v0.11 entry consolidating install + uninstall accomplishments and interface contracts.
+- **README "Quick Start"** restructured: `pipx install sentinel-mac
+  && sentinel install` is now Option 1 (Recommended). Old Option 2
+  (`install.sh`) moved to Option 3 (development only). Old Option 3
+  (manual pip + handwritten plist) is now Option 2.
+- **`install.sh` header**: marked "for SOURCE-TREE DEVELOPMENT
+  only" with direct pointer to `pipx install + sentinel install`
+  for operational use. The script itself is unchanged — just
+  surfaced the dev-only intent that was already implicit.
 
 ## [0.10.3] - 2026-05-05
 
