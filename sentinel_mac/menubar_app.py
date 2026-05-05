@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import logging
 import os
 import re
@@ -48,6 +49,12 @@ from sentinel_mac.core import (
 )
 from sentinel_mac.engine import AlertEngine
 from sentinel_mac.models import Alert, SystemMetrics
+from sentinel_mac.updater.menubar_helpers import (
+    add_skipped_version,
+    parse_check_envelope,
+    read_skipped_versions,
+    should_show_dialog,
+)
 
 # Round-trip YAML preserves comments, blank lines, key order, and quoting
 # style across load → mutate → dump, so toggling a Settings switch from the
@@ -314,6 +321,14 @@ class SentinelApp(rumps.App):
             f"All entries · last {LOG_WINDOW_HOURS}h",
             callback=self._on_open_all_log,
         ))
+
+        # Update-related state
+        self._update_item = rumps.MenuItem(
+            "Check for Updates…", callback=self._on_check_updates
+        )
+        self._update_in_progress = False
+        self._pending_update_action: dict[str, Any] | None = None
+
         self._quit_item = rumps.MenuItem("Quit Sentinel", callback=self._on_quit)
 
         self.menu = [
@@ -334,6 +349,8 @@ class SentinelApp(rumps.App):
             self._settings_submenu,
             None,
             self._open_log_item,
+            None,
+            self._update_item,
             None,
             self._quit_item,
         ]
@@ -447,6 +464,19 @@ class SentinelApp(rumps.App):
 
     @rumps.timer(POLL_SECONDS)
     def _on_tick(self, _sender: Any) -> None:
+        # Check for pending update dialog from background thread
+        if self._pending_update_action is not None:
+            action = self._pending_update_action
+            self._pending_update_action = None
+            if action.get("action_type") == "apply_result":
+                self._handle_apply_result(action["envelope"])
+                self._update_in_progress = False
+                self._update_item.title = "Check for Updates…"
+                self._update_item.set_callback(self._on_check_updates)
+            else:
+                # Check result (default)
+                self._handle_check_result(action)
+
         if self._paused:
             return
         self._refresh()
@@ -658,6 +688,186 @@ class SentinelApp(rumps.App):
         )
         rumps.alert(alert.title, body)
 
+    # ── Update checking and applying ────────────────────────────────────────
+    def _on_check_updates(self, _sender: Any) -> None:
+        """Menu click handler. Spawn background thread to check for updates."""
+        if self._update_in_progress:
+            return
+        threading.Thread(
+            target=self._check_updates_worker, daemon=True
+        ).start()
+
+    def _check_updates_worker(self) -> None:
+        """Background: run 'sentinel update --check --json' and parse result."""
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "sentinel_mac", "update", "--check", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            envelope = parse_check_envelope(result.stdout) if result.stdout else {
+                "result": "error",
+                "message": "Empty response from version check",
+            }
+        except subprocess.TimeoutExpired:
+            envelope = {
+                "result": "error",
+                "message": "Version check timed out (timeout 30s)",
+            }
+        except Exception as exc:
+            logging.exception("check_updates_worker failed")
+            envelope = {
+                "result": "error",
+                "message": f"Version check failed: {exc}",
+            }
+
+        # Store result for main thread to process
+        self._pending_update_action = envelope
+
+    def _handle_check_result(self, envelope: dict) -> None:
+        """Main thread: handle check result and show appropriate UI."""
+        result = envelope.get("result", "error")
+
+        if result == "up_to_date":
+            running_version = envelope.get("running", "unknown")
+            with contextlib.suppress(Exception):
+                rumps.notification(
+                    "Sentinel is up to date",
+                    f"v{running_version}",
+                    "",
+                )
+
+        elif result == "update_available":
+            latest = envelope.get("latest", "unknown")
+            running = envelope.get("running", "unknown")
+            skipped = read_skipped_versions(resolve_data_dir())
+            if not should_show_dialog(envelope, skipped):
+                # Previously skipped — silent.
+                return
+
+            title = f"Update available: v{latest}"
+            message = f"Current version: v{running}\n\nA new version is available."
+
+            choice = rumps.alert(
+                title,
+                message,
+                ok="Update Now",
+                other="Skip This Version",
+                cancel="Cancel",
+            )
+
+            if choice.clicked == 1:  # "Update Now"
+                self._apply_update_async(latest)
+            elif choice.clicked == 2:  # "Skip This Version"
+                add_skipped_version(resolve_data_dir(), latest)
+                with contextlib.suppress(Exception):
+                    rumps.notification(
+                        "Version skipped",
+                        f"v{latest} will not prompt again",
+                        "",
+                    )
+            # choice.clicked == 0 is "Cancel", do nothing
+
+        else:
+            # error, editable, system_unsafe, homebrew, etc.
+            message = envelope.get("message", "Unknown error")
+            with contextlib.suppress(Exception):
+                rumps.notification(
+                    "Sentinel update check",
+                    message,
+                    "",
+                )
+
+    def _apply_update_async(self, target_version: str) -> None:
+        """Spawn background thread to run 'sentinel update --apply --yes --json'."""
+        threading.Thread(
+            target=self._apply_update_worker,
+            args=(target_version,),
+            daemon=True,
+        ).start()
+
+    def _apply_update_worker(self, target_version: str) -> None:
+        """Background: run 'sentinel update --apply --yes --json'."""
+        try:
+            self._update_in_progress = True
+            self._update_item.title = "Updating…"
+            self._update_item.set_callback(None)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "sentinel_mac",
+                    "update",
+                    "--apply",
+                    "--yes",
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+
+            envelope = {}
+            if result.stdout:
+                try:
+                    envelope = json.loads(result.stdout)
+                except json.JSONDecodeError:
+                    logging.exception("failed to parse apply envelope")
+                    envelope = {
+                        "result": "error",
+                        "message": "Failed to parse update response",
+                    }
+
+        except subprocess.TimeoutExpired:
+            envelope = {
+                "result": "error",
+                "message": "Update timed out (timeout 300s)",
+            }
+        except Exception as exc:
+            logging.exception("apply_update_worker failed")
+            envelope = {
+                "result": "error",
+                "message": f"Update failed: {exc}",
+            }
+        finally:
+            # Store result for main thread
+            self._pending_update_action = {
+                "action_type": "apply_result",
+                "envelope": envelope,
+            }
+
+    def _handle_apply_result(self, envelope: dict) -> None:
+        """Main thread: handle apply result notification."""
+        result = envelope.get("result", "error")
+
+        if result == "success":
+            new_version = envelope.get("latest", "unknown")
+            with contextlib.suppress(Exception):
+                rumps.notification(
+                    f"Sentinel updated to v{new_version}",
+                    "Quit and relaunch the menu bar app to load the new code.",
+                    "",
+                )
+
+        elif result == "locked":
+            pid = envelope.get("pid", "unknown")
+            with contextlib.suppress(Exception):
+                rumps.notification(
+                    "Update in progress",
+                    f"Another update in progress (PID {pid})",
+                    "",
+                )
+
+        else:
+            # failure, cancelled, or error
+            message = envelope.get("message", "Update failed")
+            with contextlib.suppress(Exception):
+                rumps.alert(
+                    "Update failed",
+                    message,
+                )
 
 def main() -> None:
     if not _acquire_singleton_lock():

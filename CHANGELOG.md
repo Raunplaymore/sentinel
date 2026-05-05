@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (v0.10 ADR 0010 Track C)
+
+- **Menu bar "Check for Updates…" item** — new menu item positioned before Quit. Clicking spawns a background thread to run `sentinel update --check --json` without blocking the UI.
+- **Update availability dialog** — when a new version is detected, a macOS native modal shows three options: "Update Now" (launches `--apply --yes`), "Skip This Version" (records version in `<data_dir>/updater/skipped_versions.txt`), or "Cancel".
+- **Success/failure notifications** — after `--apply` completes, shows native notification with outcome (success → "Quit and relaunch menu bar app to load new code"; failure → error message and recovery guidance).
+- **Skipped versions persistence** — versions recorded in `<data_dir>/updater/skipped_versions.txt` are read on startup and suppressed from re-prompting until cleared by user. File is created on first skip and persisted atomically.
+- **Background thread synchronization** — pending dialog results are stored on the instance and processed by the main `_on_tick` timer, ensuring all rumps UI calls happen on the main thread (no threading violations).
+- **No badge on icon** — update notifications use only native macOS notifications and alerts; the menubar icon badge semantics (= active security alert) are preserved.
+- **ADR 0010 v0.10 complete** — Track A (detection + `--check`) + Track B (apply + daemon restart) + Track C (menu bar UI) all merged. Self-update feature is now end-to-end functional for menu bar users (pipx/pip-venv; Homebrew support deferred to v0.11).
+
 ### Added (v0.10 ADR 0010 Track B)
 
 - **`sentinel update --apply` flag** — implements full self-update sequence: exclusive lock (`fcntl.flock`) → stop daemon (`launchctl unload`) → install new version (pipx/pip-venv) → restart daemon (`launchctl load`) → verify version. Rollback on upgrade failure: records old version and reinstalls on non-zero exit (best-effort; documents limitation).
