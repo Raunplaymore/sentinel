@@ -470,6 +470,9 @@ sentinel --report --since 7d --severity critical
 sentinel --report --since 24h --source agent_log --type agent_command
 sentinel --report --json --since 30d > events.json    # versioned envelope
 
+# Raw JSONL inspection (jq / SQLite import / forensics)
+# See: docs/usage/event-logs.md
+
 # Host trust context (v0.6+, ADR 0003)
 sentinel context status                # full snapshot (frequency + blocklist + known_hosts)
 sentinel context status api.x.io       # single-host detail (trust level, counts)
