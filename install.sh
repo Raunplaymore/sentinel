@@ -1,21 +1,19 @@
 #!/bin/bash
 # ───────────────────────────────────────
-# Sentinel — One-Command Installer
+# Sentinel — Source-Tree Installer
 # ───────────────────────────────────────
 #
-# This script remains supported. For most users, however, the simpler
-# path is:
+# This script is for SOURCE-TREE DEVELOPMENT only. For most users:
 #
 #     pipx install sentinel-mac
-#     sentinel --init-config
-#     sentinel start
+#     sentinel install            # ← v0.11+: config + LaunchAgent + start, one shot
 #
 # Use install.sh when you specifically want one of:
-#   - the launchd plist set up automatically (auto-start on login)
-#   - the `sentinel` shell alias added to your rc file
 #   - source-tree development (live edits picked up via venv install)
+#   - the `sentinel` shell alias added to your rc file
+#   - the launchd plist set up automatically (auto-start on login)
 #
-# Otherwise pipx is recommended.
+# For all other cases, prefer `pipx install + sentinel install`.
 #
 set -e
 

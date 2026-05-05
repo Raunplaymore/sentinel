@@ -1,6 +1,7 @@
 # ADR 0011 — First-Install Flow (v0.11)
 
-- **Status**: Proposed
+- **Status**: Accepted
+- **Accepted**: 2026-05-05
 - **Date**: 2026-05-04
 - **Scope**: `sentinel_mac/commands/install.py` (new),
   `sentinel_mac/commands/uninstall.py` (new),

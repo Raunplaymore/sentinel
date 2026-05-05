@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.0] - TBD
+
+v0.11 ships the first-install and uninstall workflows frozen in ADR 0011. Track A (`sentinel install`) merged first; Track B+C complete the symmetric teardown and documentation reorder for a cohesive onboarding experience.
+
+### Added (v0.11 ADR 0011 Track B — `sentinel uninstall`)
+- `sentinel uninstall` — symmetric teardown of `sentinel install`. Default mode stops the daemon and removes the LaunchAgent plist; config and event history are preserved. Use `--purge` to also delete config and all events. Follows ADR 0009 non-TTY/confirmation patterns and ADR 0004 JSON envelope structure (`kind="uninstall"` / `kind="uninstall_error"`). Exit codes: 0 success, 1 error, 2 not installed. Resolves the "how do I fully uninstall" gap identified in v0.9–v0.10 user feedback.
+- ADR 0011 Status: Proposed → **Accepted** — Track A + B merge closes the contract and freezes all CLI surfaces, exit codes, and JSON envelopes.
+
+### Changed (v0.11 ADR 0011 Track C — Documentation reorder)
+- **README Quick Start restructure**: `pipx install sentinel-mac && sentinel install` is now Option 1 (Recommended). Old Option 2 (`install.sh`) moved to Option 3 (development only). Old Option 3 (manual pip) compressed to Option 2 (for users with existing venv tooling).
+- **install.sh header updated**: now clearly marked "for SOURCE-TREE DEVELOPMENT only" with direct guidance to use `pipx install + sentinel install` for operational deployments. Enables dev contributors to find the script easily while guiding most users toward the standard path.
+- `CHANGELOG.md` v0.11 entry consolidating install + uninstall accomplishments and interface contracts.
+
 ## [0.10.3] - 2026-05-05
 
 Critical bug fix. **All v0.10.x users running `sentinel update` should
