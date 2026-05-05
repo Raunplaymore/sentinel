@@ -19,6 +19,11 @@ status_interval_minutes: 60
 # Alert cooldown (minutes) — prevents repeated alerts in the same category
 cooldown_minutes: 10
 
+# Days to keep <data_dir>/events/YYYY-MM-DD.jsonl audit files (default 90).
+# Older files are pruned during daily rotation. Must be a positive integer;
+# invalid values fall back to 90 with a WARNING (fail-soft per ADR 0005 §D3).
+event_log_retention_days: 90
+
 # ── Notification Channels ──
 # If a value is set, the channel is active. No separate on/off switches.
 notifications:
