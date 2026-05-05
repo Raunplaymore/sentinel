@@ -54,6 +54,9 @@ sentinel-app = "sentinel_mac.menubar_app:main"
 [tool.setuptools.packages.find]
 include = ["sentinel_mac*"]
 
+[tool.setuptools.package-data]
+sentinel_mac = ["config.example.yaml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
