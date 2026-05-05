@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-05-05
+
+Patch release. No new features, two follow-ups to v0.10.0 work:
+
 ### Added
 - **`event_log_retention_days` config key** — exposes the JSONL audit
   log retention window (`<data_dir>/events/YYYY-MM-DD.jsonl`) to
@@ -16,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   up live by SIGHUP reload via the existing `_event_logger.close()
   → reopen` path. Surfaced from `EventLogger`'s constructor kwarg
   that already existed but had no config wiring through v0.10.0.
+
+### Documentation
+- **`docs/usage/event-logs.md`** — new how-to guide for inspecting
+  the JSONL audit log: file location resolution (pipx / pip / source
+  / `SENTINEL_DATA_DIR`), event shape with ADR 0004 §D3 additive
+  detail policy, `sentinel --report` filter combinations, `jq`
+  recipes (count by type, PID tracing, forensic context extraction,
+  time-range slicing, live tail, CSV export), optional one-shot
+  SQLite import, and the rationale for choosing JSONL over a
+  database. README "Commands" section gains a one-line pointer to
+  the new doc.
 
 ## [0.10.0] - 2026-05-05
 
