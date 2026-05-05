@@ -53,6 +53,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "check_interval_seconds": 30,
     "status_interval_minutes": 60,
     "cooldown_minutes": 10,
+    # Days to keep <data_dir>/events/YYYY-MM-DD.jsonl files. Pruned during
+    # daily rotation. Must be a positive integer; invalid values fall back
+    # to EventLogger.DEFAULT_RETENTION_DAYS with a WARNING.
+    "event_log_retention_days": 90,
     "thresholds": {
         "battery_warning": 20,
         "battery_critical": 10,
@@ -64,6 +68,24 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "disk_critical": 90,
     }
 }
+
+
+def _resolve_event_log_retention(config: dict) -> Optional[int]:
+    """Return positive int or None (None → EventLogger uses DEFAULT_RETENTION_DAYS).
+
+    Invalid values (non-int, <=0) log a WARNING and fall back to None so the
+    daemon never aborts startup over a typo. Per ADR 0005 §D3 fail-soft.
+    """
+    raw = config.get("event_log_retention_days")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        logging.warning(
+            "event_log_retention_days must be a positive integer (got %r); "
+            "falling back to default", raw,
+        )
+        return None
+    return raw
 
 
 def resolve_config_path(explicit_path: Optional[str] = None) -> Optional[Path]:
@@ -315,7 +337,10 @@ class Sentinel:
         self.collector = MacOSCollector()
         self.engine = AlertEngine(self.config)
         self.notifier = NotificationManager(self.config)
-        self._event_logger = EventLogger(self._data_dir)
+        self._event_logger = EventLogger(
+            self._data_dir,
+            retention_days=_resolve_event_log_retention(self.config),
+        )
 
         # Security layer — event queue shared between collectors and main loop
         self._security_queue: queue.Queue = queue.Queue(maxsize=1000)
@@ -660,7 +685,10 @@ class Sentinel:
                 self._event_logger.close()
             except Exception as exc:  # pragma: no cover — close is idempotent
                 logging.debug("event_logger.close during reload failed: %s", exc)
-            self._event_logger = EventLogger(self._data_dir)
+            self._event_logger = EventLogger(
+                self._data_dir,
+                retention_days=_resolve_event_log_retention(self.config),
+            )
 
             # FSWatcher restart only if watch_paths actually changed.
             # Restarting the watchdog observer is expensive (~100ms) so we

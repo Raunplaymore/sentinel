@@ -295,12 +295,18 @@ seconds and gives you a fresh `.db` whenever you need it.
 
 ## Retention
 
-`EventLogger` keeps daily files for **90 days** by default
-(`EventLogger.DEFAULT_RETENTION_DAYS`). Older `YYYY-MM-DD.jsonl`
-files are pruned during daily rotation. The retention window is
-not user-configurable from `config.yaml` as of v0.10.0 — adjust it
-in source if you need shorter or longer. (Tracking issue: this is a
-v0.11+ candidate.)
+`EventLogger` keeps daily files for **90 days** by default. Older
+`YYYY-MM-DD.jsonl` files are pruned during daily rotation. Override
+in `config.yaml`:
+
+```yaml
+event_log_retention_days: 30   # keep only the last 30 days
+```
+
+Must be a positive integer. Invalid values (zero, negative, string,
+float, `true`/`false`) fall back to 90 with a `WARNING` in the log
+— the daemon never aborts startup over a typo (fail-soft per ADR
+0005 §D3). The setting is also picked up live by SIGHUP reload.
 
 To archive before pruning:
 

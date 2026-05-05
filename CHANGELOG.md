@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **`event_log_retention_days` config key** — exposes the JSONL audit
+  log retention window (`<data_dir>/events/YYYY-MM-DD.jsonl`) to
+  `config.yaml`. Default 90 (unchanged). Validated as a positive
+  integer; invalid values (zero, negative, string, float, bool) fall
+  back to 90 with a `WARNING` (fail-soft per ADR 0005 §D3). Picked
+  up live by SIGHUP reload via the existing `_event_logger.close()
+  → reopen` path. Surfaced from `EventLogger`'s constructor kwarg
+  that already existed but had no config wiring through v0.10.0.
+
 ## [0.10.0] - 2026-05-05
 
 The "self-update" release. Single-theme cycle, single ADR (0010 —
