@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sentinel-mac"
-version = "0.10.1"
+version = "0.10.2"
 description = "AI Agent Security Guardian for macOS — monitors system health and AI agent behavior (file access, network connections, risky commands) with smart alerts"
 readme = "README.md"
 license = "MIT"
