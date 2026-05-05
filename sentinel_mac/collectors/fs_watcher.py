@@ -12,6 +12,7 @@ import queue
 import subprocess
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import date as _date_cls
 from datetime import datetime
@@ -197,10 +198,20 @@ class FSWatcher:
         self._bulk_lock = threading.Lock()
         self._last_bulk_alert_time = 0.0
 
-        # lsof cache to avoid hammering it
-        self._lsof_cache: dict[str, tuple[int, str]] = {}
-        self._lsof_cache_time = 0.0
-        self._lsof_cache_ttl = 2.0  # seconds
+        # lsof cache — per-path TTL with LRU eviction.
+        # v0.11 perf fix (docs/perf/v0.11-lsof-2026-05-05.md): the prior
+        # version stored only positive results under a single global
+        # timestamp. fs_events mostly land on files with no holder, so the
+        # cache was never populated and every call paid the macOS lsof cost
+        # (~290ms/call measured). New cache stores both positive and
+        # negative results per path with per-entry TTL.
+        # TTL is 30s — generous because lsof on macOS is so slow that a
+        # 10-path rotation cannot complete a round inside a 2s window
+        # (10 * 290ms ≈ 3s). 30s is well within "actor attribution can be
+        # mildly stale" tolerance for fs_watcher (best-effort by design).
+        self._lsof_cache: OrderedDict[str, tuple[int, str, float]] = OrderedDict()
+        self._lsof_cache_ttl = 30.0  # seconds
+        self._lsof_cache_max = 512  # LRU cap
 
     def attach_event_logger(self, event_logger: "EventLogger") -> None:
         """Wire the EventLogger so download joins can rewrite the JSONL.
@@ -569,38 +580,45 @@ class FSWatcher:
     def _identify_actor(self, path: str) -> tuple[int, str]:
         """Best-effort identification of which process has the file open.
 
-        Uses lsof with a short cache to avoid excessive subprocess calls.
+        Uses lsof with a per-path TTL cache to avoid excessive subprocess
+        calls. Both positive results (a process holds the file) and
+        negative results (no holder found) are cached — fs_events mostly
+        land on files with no holder, so caching the negative case is
+        what actually moves the perf needle.
+
         Returns (pid, process_name) or (0, "unknown") if not identifiable.
         """
         now = time.time()
 
-        # Check cache
-        if now - self._lsof_cache_time < self._lsof_cache_ttl:
-            cached = self._lsof_cache.get(path)
-            if cached:
-                return cached
+        cached = self._lsof_cache.get(path)
+        if cached is not None:
+            pid, name, cached_at = cached
+            if now - cached_at < self._lsof_cache_ttl:
+                self._lsof_cache.move_to_end(path)
+                return pid, name
+            # stale — fall through to refresh
 
-        # Refresh lsof for this file
+        pid, name = 0, "unknown"
         try:
             result = subprocess.run(
                 ["lsof", "-F", "pcn", "--", path],
                 capture_output=True, text=True, timeout=2,
             )
             if result.returncode == 0 and result.stdout.strip():
-                pid = 0
-                name = "unknown"
                 for line in result.stdout.strip().splitlines():
                     if line.startswith("p"):
                         pid = int(line[1:])
                     elif line.startswith("c"):
                         name = line[1:]
-                self._lsof_cache[path] = (pid, name)
-                self._lsof_cache_time = now
-                return pid, name
         except (subprocess.TimeoutExpired, ValueError, OSError):
             pass
 
-        return 0, "unknown"
+        # Cache both positive and negative results — same TTL.
+        self._lsof_cache[path] = (pid, name, now)
+        self._lsof_cache.move_to_end(path)
+        if len(self._lsof_cache) > self._lsof_cache_max:
+            self._lsof_cache.popitem(last=False)
+        return pid, name
 
     def _is_ai_process(self, name: str, pid: int) -> bool:
         """Check if a process name/pid belongs to an AI agent."""
