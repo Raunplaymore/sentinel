@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-05-07
+
+Critical bug fix. **All v0.11.0 PyPI users running `sentinel-app`
+should upgrade.**
+
+### Fixed
+- **`rumps` and `ruamel.yaml` were not declared as required runtime
+  dependencies** — they sat in `[project.optional-dependencies] app`
+  while `[project.scripts] sentinel-app` was unconditionally exposed.
+  Users running `sentinel-app` after a default `pipx install
+  sentinel-mac` (or any clean PyPI install) hit
+  `ModuleNotFoundError: No module named 'rumps'` immediately, then
+  after `pipx inject sentinel-mac rumps`, hit `No module named
+  'ruamel'` on the next import. The menu bar app — a flagship
+  feature of sentinel-mac — was effectively broken on every clean
+  install. Same shape of bug as v0.10.3 (`packaging` missing).
+- Fix: promoted both `rumps>=0.4.0,<1` and `ruamel.yaml>=0.18,<1`
+  to `[project] dependencies`. The `[app]` extras alias is kept
+  empty for backwards compatibility (no-op so existing
+  `pipx install "sentinel-mac[app]"` invocations still work).
+
+### Changed
+- **AST-scanner regression test** — `tests/test_dependencies.py`
+  gained `test_all_top_level_imports_declared` which walks every
+  `.py` under `sentinel_mac/`, parses imports, and asserts every
+  external package is declared in `pyproject.toml`. Catches both
+  v0.10.3 and v0.11.1 bug shapes automatically — no hand-curated
+  list to keep in sync. Verified the same scanner would have
+  flagged `rumps` and `ruamel.yaml` as missing under the v0.11.0
+  state.
+- Two new explicit-import smoke tests (`test_rumps_is_importable`,
+  `test_ruamel_yaml_is_importable`) and an end-to-end import test
+  for `sentinel_mac.menubar_app` so the failure surfaces with a
+  clear assertion message rather than as a downstream
+  ModuleNotFoundError.
+
 ## [0.11.0] - 2026-05-06
 
 The "first install" release. Closes the symmetric counterpart to
