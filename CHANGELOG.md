@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-05-07
+
+Patch release. Quality-of-life fix for users intentionally running with
+one of the macOS security controls disabled.
+
+### Added
+- **`security_posture.ignore` config key** — suppresses the
+  recurring "Security Posture Risk" warning for controls the user
+  intentionally keeps disabled (e.g., Firewall off for VPN tooling
+  / dev workflows; FileVault off on a personal Mac for key-recovery
+  reasons). Valid entries: `firewall`, `gatekeeper`, `filevault`
+  (case-insensitive). Default `[]` — no behavior change for users
+  who do not opt in.
+
+  ```yaml
+  security_posture:
+    ignore: [firewall]   # Firewall warning silenced; Gatekeeper /
+                         # FileVault still warn if disabled
+  ```
+
+  Validation is fail-soft per ADR 0005 §D3 — invalid types
+  (non-list, non-string elements) and unknown control names are
+  dropped with a `WARNING` so a typo never aborts daemon startup.
+  9 new tests cover positive / negative paths, case-insensitive
+  matching, multi-control combos, and every fail-soft branch.
+
 ## [0.11.1] - 2026-05-07
 
 Critical bug fix. **All v0.11.0 PyPI users running `sentinel-app`
