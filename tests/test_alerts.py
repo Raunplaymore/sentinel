@@ -181,6 +181,109 @@ class TestSecurityAlerts:
         assert not any(a.category == "security_posture" for a in alerts)
 
 
+class TestSecurityPostureIgnore:
+    """v0.11.2 — `security_posture.ignore` config key suppresses the
+    recurring warning for controls the user intentionally keeps disabled."""
+
+    def _config_with_ignore(self, ignore_list):
+        cfg = dict(DEFAULT_CONFIG)
+        cfg["security_posture"] = {"ignore": ignore_list}
+        return cfg
+
+    def test_ignore_firewall_suppresses_alert_when_only_firewall_off(self):
+        engine = AlertEngine(self._config_with_ignore(["firewall"]))
+        m = make_metrics(firewall_enabled=False)
+        alerts = engine.evaluate(m)
+        assert not any(a.category == "security_posture" for a in alerts)
+
+    def test_ignore_firewall_keeps_alert_for_other_disabled_controls(self):
+        engine = AlertEngine(self._config_with_ignore(["firewall"]))
+        m = make_metrics(
+            firewall_enabled=False,
+            gatekeeper_enabled=False,
+        )
+        alerts = engine.evaluate(m)
+        sec = [a for a in alerts if a.category == "security_posture"]
+        assert len(sec) == 1
+        # Firewall must NOT appear in the message; Gatekeeper must.
+        assert "Firewall" not in sec[0].message
+        assert "Gatekeeper" in sec[0].message
+
+    def test_ignore_all_three_suppresses_alert_entirely(self):
+        engine = AlertEngine(
+            self._config_with_ignore(["firewall", "gatekeeper", "filevault"]),
+        )
+        m = make_metrics(
+            firewall_enabled=False,
+            gatekeeper_enabled=False,
+            filevault_enabled=False,
+        )
+        alerts = engine.evaluate(m)
+        assert not any(a.category == "security_posture" for a in alerts)
+
+    def test_ignore_is_case_insensitive(self):
+        engine = AlertEngine(
+            self._config_with_ignore(["FireWall", "  GATEKEEPER  "]),
+        )
+        m = make_metrics(firewall_enabled=False, gatekeeper_enabled=False)
+        alerts = engine.evaluate(m)
+        assert not any(a.category == "security_posture" for a in alerts)
+
+    def test_unknown_control_in_ignore_logged_and_dropped(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING):
+            engine = AlertEngine(
+                self._config_with_ignore(["bogus", "firewall"]),
+            )
+        # firewall still ignored despite the typo neighbor
+        m = make_metrics(firewall_enabled=False)
+        alerts = engine.evaluate(m)
+        assert not any(a.category == "security_posture" for a in alerts)
+        assert "unknown control" in caplog.text.lower()
+
+    def test_non_string_entry_logged_and_dropped(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING):
+            engine = AlertEngine(
+                self._config_with_ignore([123, "firewall"]),
+            )
+        m = make_metrics(firewall_enabled=False)
+        alerts = engine.evaluate(m)
+        assert not any(a.category == "security_posture" for a in alerts)
+        assert "must be a string" in caplog.text.lower()
+
+    def test_ignore_not_a_list_falls_back_to_empty(self, caplog):
+        import logging
+        cfg = dict(DEFAULT_CONFIG)
+        cfg["security_posture"] = {"ignore": "firewall"}  # string, not list
+        with caplog.at_level(logging.WARNING):
+            engine = AlertEngine(cfg)
+        # falls back to empty — alert still fires
+        m = make_metrics(firewall_enabled=False)
+        alerts = engine.evaluate(m)
+        assert any(a.category == "security_posture" for a in alerts)
+        assert "must be a list" in caplog.text.lower()
+
+    def test_security_posture_not_a_dict_falls_back_to_empty(self, caplog):
+        import logging
+        cfg = dict(DEFAULT_CONFIG)
+        cfg["security_posture"] = "firewall"  # whole section is wrong shape
+        with caplog.at_level(logging.WARNING):
+            engine = AlertEngine(cfg)
+        m = make_metrics(firewall_enabled=False)
+        alerts = engine.evaluate(m)
+        assert any(a.category == "security_posture" for a in alerts)
+        assert "must be a mapping" in caplog.text.lower()
+
+    def test_default_config_does_not_ignore_anything(self):
+        """The DEFAULT_CONFIG ships with empty ignore — alert fires as
+        before for any disabled control."""
+        engine = AlertEngine(DEFAULT_CONFIG)
+        m = make_metrics(firewall_enabled=False)
+        alerts = engine.evaluate(m)
+        assert any(a.category == "security_posture" for a in alerts)
+
+
 class TestDiskAlerts:
 
     def test_disk_critical(self):

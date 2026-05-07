@@ -24,6 +24,17 @@ cooldown_minutes: 10
 # invalid values fall back to 90 with a WARNING (fail-soft per ADR 0005 §D3).
 event_log_retention_days: 90
 
+# Suppress "Security Posture Risk" alerts for controls you intentionally
+# keep disabled (e.g., Firewall off for VPN tooling). Valid entries:
+# "firewall", "gatekeeper", "filevault" (case-insensitive). Default is
+# empty — alert fires when ANY of the three are off.
+#
+# Example — silence only the Firewall warning, still warn on the other two:
+#   security_posture:
+#     ignore: [firewall]
+security_posture:
+  ignore: []
+
 # ── Notification Channels ──
 # If a value is set, the channel is active. No separate on/off switches.
 notifications:

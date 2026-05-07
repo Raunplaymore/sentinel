@@ -57,6 +57,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # daily rotation. Must be a positive integer; invalid values fall back
     # to EventLogger.DEFAULT_RETENTION_DAYS with a WARNING.
     "event_log_retention_days": 90,
+    # v0.11.2 — Security Posture Risk alert is fired when Firewall /
+    # Gatekeeper / FileVault is OFF. Users intentionally disable some of
+    # these (VPN tooling, dev workflows, key-recovery concerns). List the
+    # controls you keep off here to suppress the recurring warning.
+    # Valid entries: "firewall", "gatekeeper", "filevault" (case-insensitive).
+    "security_posture": {"ignore": []},
     "thresholds": {
         "battery_warning": 20,
         "battery_critical": 10,

@@ -40,6 +40,52 @@ _VALID_CONTEXT_LEVELS: frozenset[str] = frozenset(
     {"minimal", "standard", "full"}
 )
 
+_VALID_POSTURE_CONTROLS: frozenset[str] = frozenset(
+    {"firewall", "gatekeeper", "filevault"}
+)
+
+
+def _normalize_posture_ignore(config: dict) -> frozenset[str]:
+    """Read `security_posture.ignore` from config, return lower-cased set.
+
+    Invalid shapes (non-list, non-string elements, unknown control names)
+    are dropped silently with a single WARNING — fail-soft per ADR 0005 §D3
+    so a config typo never aborts daemon startup.
+
+    Returns ``frozenset()`` when the key is absent or empty.
+    """
+    posture = config.get("security_posture") or {}
+    if not isinstance(posture, dict):
+        logger.warning(
+            "security_posture must be a mapping (got %r); ignoring", type(posture).__name__,
+        )
+        return frozenset()
+    raw = posture.get("ignore", [])
+    if raw in (None, ""):
+        return frozenset()
+    if not isinstance(raw, list):
+        logger.warning(
+            "security_posture.ignore must be a list (got %r); ignoring", type(raw).__name__,
+        )
+        return frozenset()
+    cleaned: set[str] = set()
+    for entry in raw:
+        if not isinstance(entry, str):
+            logger.warning(
+                "security_posture.ignore entry must be a string (got %r); skipping",
+                type(entry).__name__,
+            )
+            continue
+        name = entry.strip().lower()
+        if name not in _VALID_POSTURE_CONTROLS:
+            logger.warning(
+                "security_posture.ignore: unknown control %r "
+                "(valid: firewall, gatekeeper, filevault); skipping", entry,
+            )
+            continue
+        cleaned.add(name)
+    return frozenset(cleaned)
+
 
 def _format_ctx_block(detail: dict, *, level: str = "standard") -> str:
     """ADR 0007 D6 — render the ``[ctx]`` block for an Alert message.
@@ -173,6 +219,17 @@ class AlertEngine:
             level = "standard"
         self._context_level: str = level
 
+        # v0.11.2 — security posture ignore list. Users intentionally
+        # disable Firewall / Gatekeeper / FileVault for legitimate
+        # reasons (VPN tooling, dev workflows, key-recovery concerns)
+        # and don't want a recurring warning every check tick. The
+        # list is lower-cased once here so the per-tick check is
+        # a cheap set lookup. Invalid entries are dropped silently —
+        # fail-soft per ADR 0005 §D3.
+        self._security_posture_ignore: frozenset[str] = (
+            _normalize_posture_ignore(config)
+        )
+
         # v0.9 Track 3b — optional callback returning the most-recent
         # user/assistant message timestamp (epoch seconds) from the
         # AgentLogParser. When present, the stuck_process branch in
@@ -294,12 +351,16 @@ class AlertEngine:
             ))
 
         # -- Security Posture --
+        # v0.11.2 — `security_posture.ignore` config key suppresses alerts
+        # for controls the user intentionally keeps disabled. Comparison
+        # is lower-cased; user writes `firewall` / `gatekeeper` / `filevault`.
+        ignore = self._security_posture_ignore
         disabled_controls = []
-        if m.firewall_enabled is False:
+        if m.firewall_enabled is False and "firewall" not in ignore:
             disabled_controls.append("Firewall")
-        if m.gatekeeper_enabled is False:
+        if m.gatekeeper_enabled is False and "gatekeeper" not in ignore:
             disabled_controls.append("Gatekeeper")
-        if m.filevault_enabled is False:
+        if m.filevault_enabled is False and "filevault" not in ignore:
             disabled_controls.append("FileVault")
 
         if disabled_controls:
