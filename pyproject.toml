@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sentinel-mac"
-version = "0.11.0"
+version = "0.11.1"
 description = "AI Agent Security Guardian for macOS — monitors system health and AI agent behavior (file access, network connections, risky commands) with smart alerts"
 readme = "README.md"
 license = "MIT"
@@ -34,12 +34,22 @@ dependencies = [
     "psutil>=5.9,<7",
     "pyyaml>=6.0,<7",
     "requests>=2.28,<3",
+    # rumps + ruamel.yaml were `[optional-dependencies] app` through v0.11.0,
+    # but `[project.scripts] sentinel-app` is exposed unconditionally —
+    # users running `sentinel-app` after a default `pipx install
+    # sentinel-mac` got ModuleNotFoundError. Promoted to required in
+    # v0.11.1 because the menu bar app is a core feature of sentinel-mac.
+    "rumps>=0.4.0,<1",
+    "ruamel.yaml>=0.18,<1",
     "watchdog>=3.0,<5",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "ruff>=0.5", "mypy>=1.8"]
-app = ["rumps>=0.4.0,<1", "ruamel.yaml>=0.18,<1"]
+# `[app]` extras kept as a no-op alias so existing
+# `pipx install "sentinel-mac[app]"` invocations don't break. The packages
+# previously listed here are now in the required `dependencies` block.
+app = []
 
 [project.urls]
 Homepage = "https://github.com/raunplaymore/sentinel"
